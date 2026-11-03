@@ -2,10 +2,23 @@
  * Gold rendition of the sidebar whale mark.
  *
  * The original FishLogo path is kept verbatim; the material is layered inside
- * the silhouette: a warm gold base gradient (key light from the upper left), a
- * narrow softbox specular band restricted to the lit flank, and an inner rim
- * that draws the bevel without growing the outline. Every layer is clipped to
- * the original path, so counters and thin tail strokes stay intact.
+ * the silhouette:
+ *
+ * 1. a warm gold base ramp, key light from the upper left,
+ * 2. a counter-light ramp from the lower right, so the metal has a second,
+ *    dimmer transition instead of darkening in one direction only,
+ * 3. a contact shadow on the shadow side,
+ * 4. the softbox reflection: a narrow band with a champagne collar, painted
+ *    after the shadow so the highlight is not buried under it,
+ * 5. an inner rim that draws the bevel without growing the outline.
+ *
+ * Every layer is clipped to the original path, so counters and thin tail
+ * strokes stay intact. On hover the reflection band travels across the metal
+ * and a second, brighter band fades in, which raises the specular ceiling
+ * without touching the diffuse gold.
+ *
+ * The material is SDR by design: the brightest stop is diffuse white, so the
+ * lockup reads the same on every display. See README for the measured reason.
  */
 import { useId } from 'react'
 import { WHALE_HEIGHT, WHALE_PATH, WHALE_WIDTH } from './paths.ts'
@@ -42,7 +55,7 @@ export function GoldBrandMark({ size = 24, className }: GoldBrandMarkProps) {
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        {/* Base: key light upper-left, warm mid gold, deep golden-brown shadow. */}
+        {/* Base: key light upper-left through warm gold into golden-brown. */}
         <linearGradient id={id('base')} x1="2" y1="0.6" x2="18" y2="17" gradientUnits="userSpaceOnUse">
           <stop offset="0" stopColor="var(--bg-gold-0, #EFCB7C)" />
           <stop offset="0.12" stopColor="var(--bg-gold-1, #E6BC66)" />
@@ -54,29 +67,55 @@ export function GoldBrandMark({ size = 24, className }: GoldBrandMarkProps) {
           <stop offset="1" stopColor="var(--bg-gold-7, #795019)" />
         </linearGradient>
 
-        {/* Softbox reflection: one narrow band crossing the mark, not a per-path sweep. */}
+        {/*
+         * Counter-light: the bounce a polished solid returns on its shadow
+         * side. Weak, and only near the lower-right edge, so the mark is lit
+         * from two directions instead of being darkened along one axis.
+         */}
+        <linearGradient id={id('bounce')} x1="21" y1="16" x2="8" y2="4" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#FFE8B0" stopOpacity="0.34" />
+          <stop offset="0.35" stopColor="#F3CE80" stopOpacity="0.14" />
+          <stop offset="0.62" stopColor="#F3CE80" stopOpacity="0" />
+          <stop offset="1" stopColor="#F3CE80" stopOpacity="0" />
+        </linearGradient>
+
+        {/* Softbox reflection: one narrow band across the lit flank. */}
         <linearGradient id={id('spec')} x1="2" y1="10" x2="19" y2="3" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#FFF9E8" stopOpacity="0" />
-          <stop offset="0.33" stopColor="#FFF9E8" stopOpacity="0" />
-          <stop offset="0.385" stopColor="#FFEFC2" stopOpacity="0.4" />
-          <stop offset="0.42" stopColor="#FFF9E8" stopOpacity="0.92" />
-          <stop offset="0.452" stopColor="#F1CE75" stopOpacity="0.22" />
-          <stop offset="0.52" stopColor="#FAE8B1" stopOpacity="0" />
+          <stop offset="0" stopColor="#FFFDF4" stopOpacity="0" />
+          <stop offset="0.3" stopColor="#FFFDF4" stopOpacity="0" />
+          <stop offset="0.37" stopColor="#FFF3CE" stopOpacity="0.55" />
+          <stop offset="0.44" stopColor="#FFFDF6" stopOpacity="1" />
+          <stop offset="0.5" stopColor="#F6D98C" stopOpacity="0.42" />
+          <stop offset="0.58" stopColor="#FAE8B1" stopOpacity="0" />
           <stop offset="1" stopColor="#FAE8B1" stopOpacity="0" />
         </linearGradient>
 
-        {/* Vertical falloff so the band only sits on the lit flank. */}
+        {/* Brighter band revealed on hover: same geometry, higher ceiling. */}
+        <linearGradient id={id('hot')} x1="2" y1="10" x2="19" y2="3" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="0.36" stopColor="#FFFFFF" stopOpacity="0.5" />
+          <stop offset="0.44" stopColor="#FFFFFF" stopOpacity="0.96" />
+          <stop offset="0.5" stopColor="#FFF4CF" stopOpacity="0.3" />
+          <stop offset="0.56" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+
+        {/*
+         * Vertical falloff keeps the band on the lit flank. The stops stay high
+         * across the upper two thirds so the band core keeps its full opacity
+         * instead of being multiplied down to a faint wash by the mask.
+         */}
         <linearGradient id={id('maskFade')} x1="0" y1="0" x2="0" y2={WHALE_HEIGHT} gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#fff" stopOpacity="0.95" />
-          <stop offset="0.45" stopColor="#fff" stopOpacity="0.75" />
-          <stop offset="0.8" stopColor="#fff" stopOpacity="0.1" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
+          <stop offset="0" stopColor="#fff" stopOpacity="1" />
+          <stop offset="0.5" stopColor="#fff" stopOpacity="0.96" />
+          <stop offset="0.82" stopColor="#fff" stopOpacity="0.45" />
+          <stop offset="1" stopColor="#fff" stopOpacity="0.1" />
         </linearGradient>
 
         {/* Inner bevel: hairline light on the upper edge, warm dark under it. */}
         <linearGradient id={id('rim')} x1="0" y1="0" x2="1" y2={WHALE_HEIGHT} gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#FFF6DC" stopOpacity="0.85" />
-          <stop offset="0.4" stopColor="#FAE8B1" stopOpacity="0.4" />
+          <stop offset="0" stopColor="#FFF6DC" stopOpacity="0.9" />
+          <stop offset="0.4" stopColor="#FAE8B1" stopOpacity="0.45" />
           <stop offset="0.75" stopColor="#795019" stopOpacity="0.45" />
           <stop offset="1" stopColor="#4A2F0C" stopOpacity="0.6" />
         </linearGradient>
@@ -85,12 +124,12 @@ export function GoldBrandMark({ size = 24, className }: GoldBrandMarkProps) {
           <rect width={WHALE_WIDTH} height={WHALE_HEIGHT} fill={`url(#${id('maskFade')})`} />
         </mask>
 
-        {/* Contact shadow inside the silhouette: lower-right depth without growing the shape. */}
+        {/* Contact shadow on the shadow side, painted before the reflection. */}
         <linearGradient id={id('depth')} x1="3" y1="2" x2="22" y2="16" gradientUnits="userSpaceOnUse">
           <stop offset="0" stopColor="#4A2F0C" stopOpacity="0" />
-          <stop offset="0.55" stopColor="#4A2F0C" stopOpacity="0" />
-          <stop offset="0.82" stopColor="#4A2F0C" stopOpacity="0.3" />
-          <stop offset="1" stopColor="#3A2408" stopOpacity="0.55" />
+          <stop offset="0.58" stopColor="#4A2F0C" stopOpacity="0" />
+          <stop offset="0.84" stopColor="#4A2F0C" stopOpacity="0.26" />
+          <stop offset="1" stopColor="#3A2408" stopOpacity="0.5" />
         </linearGradient>
 
         <clipPath id={id('clip')}>
@@ -100,8 +139,14 @@ export function GoldBrandMark({ size = 24, className }: GoldBrandMarkProps) {
 
       <g clipPath={`url(#${id('clip')})`}>
         <path d={WHALE_PATH} fill={`url(#${id('base')})`} />
-        <path className={styles.gloss} d={WHALE_PATH} fill={`url(#${id('spec')})`} mask={`url(#${id('mask')})`} />
+        <path d={WHALE_PATH} fill={`url(#${id('bounce')})`} />
         <path d={WHALE_PATH} fill={`url(#${id('depth')})`} />
+        <g className={styles.gloss} mask={`url(#${id('mask')})`}>
+          <path d={WHALE_PATH} fill={`url(#${id('spec')})`} />
+        </g>
+        <g className={styles.hot} mask={`url(#${id('mask')})`}>
+          <path d={WHALE_PATH} fill={`url(#${id('hot')})`} />
+        </g>
         <path d={WHALE_PATH} fill="none" stroke={`url(#${id('rim')})`} strokeWidth="0.62" />
       </g>
     </svg>

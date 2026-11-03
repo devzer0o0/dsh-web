@@ -7,6 +7,10 @@
  * of each glyph carrying its own copy of the gradient. The plate keeps its
  * rounded rectangle and its dark lettering; its sheen stays weaker than the
  * wordmark so the name remains the focal point.
+ *
+ * The layer order is base, counter-light, contact shadow, reflection, hover
+ * highlight, rim: the shadow never covers the reflection, and the hover band
+ * raises the specular ceiling instead of re-showing the same highlight.
  */
 import { useId } from 'react'
 import { BADGE_RECT, BADGE_TEXT_PATHS, NAME_VIEWBOX, WORDMARK_PATHS } from './paths.ts'
@@ -58,23 +62,45 @@ export function GoldBrandName({ size = 24, className }: GoldBrandNameProps) {
           <stop offset="1" stopColor="var(--bg-gold-7, #795019)" />
         </linearGradient>
 
+        {/*
+         * Counter-light: the bounce returned from the shadow side of the
+         * strokes. Weak, and only near the lower-right edge, so the metal is
+         * lit from two directions instead of darkening along a single axis.
+         */}
+        <linearGradient id={id('bounce')} x1={VB_X + 150} y1="23" x2={VB_X + 30} y2="3" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#FFE8B0" stopOpacity="0.32" />
+          <stop offset="0.35" stopColor="#F3CE80" stopOpacity="0.12" />
+          <stop offset="0.6" stopColor="#F3CE80" stopOpacity="0" />
+          <stop offset="1" stopColor="#F3CE80" stopOpacity="0" />
+        </linearGradient>
+
         {/* Narrow softbox band: a slim, near-white core with a champagne collar. */}
         <linearGradient id={id('spec')} x1={VB_X} y1="12" x2={VB_X + 156} y2="12" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#FFF9E8" stopOpacity="0" />
-          <stop offset="0.3" stopColor="#FFF9E8" stopOpacity="0" />
-          <stop offset="0.38" stopColor="#FFEFC2" stopOpacity="0.4" />
-          <stop offset="0.42" stopColor="#FFF9E8" stopOpacity="0.92" />
-          <stop offset="0.45" stopColor="#FAE8B1" stopOpacity="0.5" />
-          <stop offset="0.56" stopColor="#FAE8B1" stopOpacity="0" />
+          <stop offset="0" stopColor="#FFFDF4" stopOpacity="0" />
+          <stop offset="0.3" stopColor="#FFFDF4" stopOpacity="0" />
+          <stop offset="0.37" stopColor="#FFF3CE" stopOpacity="0.55" />
+          <stop offset="0.42" stopColor="#FFFDF6" stopOpacity="1" />
+          <stop offset="0.47" stopColor="#F6D98C" stopOpacity="0.46" />
+          <stop offset="0.58" stopColor="#FAE8B1" stopOpacity="0" />
           <stop offset="1" stopColor="#FAE8B1" stopOpacity="0" />
         </linearGradient>
 
-        {/* Keep the band on the upper half of the strokes. */}
+        {/* Hover: same geometry, full white core, so the ceiling rises. */}
+        <linearGradient id={id('hot')} x1={VB_X} y1="12" x2={VB_X + 156} y2="12" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="0.35" stopColor="#FFFFFF" stopOpacity="0.45" />
+          <stop offset="0.44" stopColor="#FFFFFF" stopOpacity="0.95" />
+          <stop offset="0.5" stopColor="#FFF4CF" stopOpacity="0.34" />
+          <stop offset="0.58" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+
+        {/* Keep the band on the lit part of the strokes without washing it out. */}
         <linearGradient id={id('maskFade')} x1="0" y1="1" x2="0" y2="24" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#fff" stopOpacity="0.9" />
-          <stop offset="0.5" stopColor="#fff" stopOpacity="0.6" />
-          <stop offset="0.85" stopColor="#fff" stopOpacity="0.06" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
+          <stop offset="0" stopColor="#fff" stopOpacity="1" />
+          <stop offset="0.52" stopColor="#fff" stopOpacity="0.94" />
+          <stop offset="0.85" stopColor="#fff" stopOpacity="0.42" />
+          <stop offset="1" stopColor="#fff" stopOpacity="0.12" />
         </linearGradient>
 
         {/* Bevel: hairline light on the top edge, warm shadow along the bottom. */}
@@ -135,14 +161,22 @@ export function GoldBrandName({ size = 24, className }: GoldBrandNameProps) {
         {WORDMARK_PATHS.map((d, index) => (
           <path key={`base-${index}`} d={d} fill={`url(#${id('base')})`} />
         ))}
+        {WORDMARK_PATHS.map((d, index) => (
+          <path key={`bounce-${index}`} d={d} fill={`url(#${id('bounce')})`} />
+        ))}
+        {WORDMARK_PATHS.map((d, index) => (
+          <path key={`depth-${index}`} d={d} fill={`url(#${id('depth')})`} />
+        ))}
         <g className={styles.gloss} mask={`url(#${id('mask')})`}>
           {WORDMARK_PATHS.map((d, index) => (
             <path key={`spec-${index}`} d={d} fill={`url(#${id('spec')})`} />
           ))}
         </g>
-        {WORDMARK_PATHS.map((d, index) => (
-          <path key={`depth-${index}`} d={d} fill={`url(#${id('depth')})`} />
-        ))}
+        <g className={styles.hot} mask={`url(#${id('mask')})`}>
+          {WORDMARK_PATHS.map((d, index) => (
+            <path key={`hot-${index}`} d={d} fill={`url(#${id('hot')})`} />
+          ))}
+        </g>
         {WORDMARK_PATHS.map((d, index) => (
           <path key={`rim-${index}`} d={d} fill="none" stroke={`url(#${id('rim')})`} strokeWidth="0.5" />
         ))}

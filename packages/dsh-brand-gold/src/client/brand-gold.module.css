@@ -57,40 +57,53 @@
   filter: drop-shadow(0 0.5px 0 rgba(0, 0, 0, 0.55)) drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.28));
 }
 
-/* The specular layer fades in only on hover, once, and never moves the layout. */
-.gloss {
-  opacity: 1;
-  transition: opacity 240ms cubic-bezier(0.4, 0, 0.2, 1);
+/*
+ * Two stacked reflection layers. `.gloss` is the steady softbox band that is
+ * always visible; `.hot` is a full-white band of the same geometry, hidden
+ * until the row is hovered, so hovering raises the specular ceiling instead of
+ * re-showing the highlight that is already there.
+ */
+.gloss,
+.hot {
+  transform: translateX(0);
+}
+
+.hot {
+  opacity: 0;
+  transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (hover: hover) and (pointer: fine) {
   /* The host row is the hover surface: the shell's brand button wraps both halves. */
-  :global([class*='_brandIdentity']):hover .gloss {
-    animation: brand-gold-sheen 520ms cubic-bezier(0.4, 0, 0.2, 1) 1;
+  :global([class*='_brandIdentity']):hover .gloss,
+  :global([class*='_brandIdentity']):hover .hot {
+    animation: brand-gold-sweep 560ms cubic-bezier(0.32, 0, 0.24, 1) 1 both;
+  }
+
+  :global([class*='_brandIdentity']):hover .hot {
+    opacity: 1;
   }
 }
 
-@keyframes brand-gold-sheen {
-  0% {
-    opacity: 0.72;
+/* The band travels across the metal and settles back on the key light. */
+@keyframes brand-gold-sweep {
+  from {
+    transform: translateX(-7%);
   }
 
-  55% {
-    opacity: 1;
-  }
-
-  100% {
-    opacity: 1;
+  to {
+    transform: translateX(0);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gloss {
-    transition: none;
+  .gloss,
+  .hot {
+    animation: none;
+    transform: none;
   }
 
-  :global([class*='_brandIdentity']):hover .gloss {
-    animation: none;
-    opacity: 1;
+  :global([class*='_brandIdentity']):hover .hot {
+    opacity: 0.7;
   }
 }

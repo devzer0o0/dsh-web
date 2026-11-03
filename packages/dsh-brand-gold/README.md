@@ -68,11 +68,23 @@ All of it lives in two places, and both are deliberately coarse:
 | Layer | Where | What it controls |
 |---|---|---|
 | Palette | `src/client/brand-gold.module.css` | `--bg-gold-0…7` (mark and letters), `--bg-gold-plate-0…5` (plate), `--bg-gold-ink` (lettering), plus the light-theme overrides |
-| Reflection geometry | `GoldBrandMark.tsx` / `GoldBrandName.tsx` | Base gradient axis, softbox band position and width, bevel rim, depth ramp |
+| Reflection geometry | `GoldBrandMark.tsx` / `GoldBrandName.tsx` | Base gradient axis, counter-light, softbox band position and width, hover band, bevel rim, depth ramp |
 
-Raising a highlight means brightening one stop of the specular gradient, not
-adding another band: the reflection structure is intentionally three layers, so
-the lockup does not turn into stripes at 24px.
+The stack is base, counter-light, contact shadow, softbox reflection, hover
+reflection, bevel rim, in that order. Two details matter more than the palette:
+
+- The contact shadow is painted **before** the reflection. Painting it after
+  buries the highlight under the shadow side, which is what made the first
+  iteration look matte.
+- The reflection is a full-opacity core. At `0.92` opacity under a vertical
+  falloff mask the effective coverage is about `0.56`, so the band reads as a
+  wash instead of a reflection; the core now stays at `1` and the mask keeps at
+  least `0.94` across the lit half.
+
+Hovering the row moves the reflection band across the metal and cross-fades to a
+second, white band of the same geometry, so the specular ceiling rises instead of
+re-showing the highlight that is already there. `prefers-reduced-motion` keeps
+the brighter band but drops the travel.
 
 ## What is verified and what is not
 
@@ -80,10 +92,26 @@ Verified in the running desktop client at the native 24px height (wide sidebar),
 in the narrow and collapsed sidebar states, and in a headless-Chrome render of
 the exact component output at 1x and 4x on both the dark and the light theme.
 
-Not claimed: real HDR output. The highlights are ordinary SDR color stops inside
-the SVG, tuned to read as metal on a normal display. No HDR color space, no
-Display P3 declaration and no brightness filter are involved; on an HDR-capable
-panel the browser tone-maps these same SDR values.
+Not delivered: real HDR output. It was built, measured and rejected, and the
+measurements are the reason the lockup stays SDR:
+
+| Path | Measured result on the reference host |
+|---|---|
+| Display headroom | Built-in XDR panel, `maximumPotentialExtendedDynamicRangeColorComponentValue` 16, current headroom about 6.3, and `(dynamic-range: high)` matches in the renderer |
+| CSS `color(srgb 4 4 4)` / `color(rec2100-pq …)`, with and without `dynamic-range-limit: no-limit` | Never above 1.0 in the framebuffer — the compositor clamps it |
+| Opaque WebGPU canvas, `rgba16float`, `toneMapping: 'extended'` | Reads back 4.0 when it is a direct child of `document.body`; 0.98 — clamped to SDR — when the same canvas lives inside the sidebar subtree |
+| Same canvas masked or clipped in CSS, or blended on the body only | Masking and `clip-path` clamp it; `mix-blend-mode: plus-lighter` on the body only keeps the over-unity values |
+
+So over-unity pixels are reachable in this renderer, but not at the lockup's
+place in the tree: the sidebar subtree clamps them. Rendering the highlight on a
+body-level overlay was tried and abandons either the clipping to the brand shape
+or the composition with the sidebar's own stacking context, and a layer that can
+only be bright where the logo is not is not an HDR logo. Shipping the SDR
+material — crisp, layered, correct on every display — was the honest outcome.
+
+If a future host lets a canvas inside the sidebar keep extended range, the hook
+point is a single extra reflection layer over the SVG; nothing in the geometry
+or the palette would have to move.
 
 ## License
 

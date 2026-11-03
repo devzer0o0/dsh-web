@@ -80,7 +80,11 @@ describe('brand-gold occupants', () => {
     const painted = [...container.querySelectorAll('g > path')]
     expect(svg?.getAttribute('viewBox')).toBe(`0 0 ${WHALE_WIDTH} ${WHALE_HEIGHT}`)
     expect(svg?.getAttribute('data-dsh-plugin')).toBe('brand-gold')
+    // Base, counter-light, contact shadow, reflection, hover band, bevel rim —
+    // every one of them the original silhouette, so nothing grows the outline.
     expect(painted.map((node) => node.getAttribute('d'))).toEqual([
+      WHALE_PATH,
+      WHALE_PATH,
       WHALE_PATH,
       WHALE_PATH,
       WHALE_PATH,
@@ -88,6 +92,29 @@ describe('brand-gold occupants', () => {
     ])
     expect(painted[0]?.getAttribute('fill')).toBe('url(#bg-mark-' + painted[0]!.closest('svg')!.querySelector('[id]')!.id.split('-')[2] + '-base)')
     expect(container.querySelector('clipPath path')?.getAttribute('d')).toBe(WHALE_PATH)
+  })
+
+  it('operator hovering the row sees the reflection band travel and a brighter band fade in', () => {
+    // Given: the mark occupant rendered with its two reflection layers.
+    const Mark = occupant('sidebar.brand.mark')
+    // When: the markup is inspected before any hover happens.
+    const { container } = render(<Mark size={24} />)
+    // Then: the steady band is always painted, the brighter one is hidden by CSS
+    // and both are the same geometry, so hover raises the ceiling rather than
+    // re-showing the highlight that is already visible.
+    const groups = [...container.querySelectorAll('g')].filter((node) => node.hasAttribute('class'))
+    expect(groups.length).toBe(2)
+    const steady = groups[0]!
+    const bright = groups[1]!
+    const ids = [...container.querySelectorAll('[id]')].map((node) => node.id)
+    const suffix = (node: Element, part: string) => {
+      const found = [...ids].find((id) => id.endsWith('-' + part))
+      if (found === undefined) throw new Error(`gradient "${part}" was not defined`)
+      return found
+    }
+    expect(steady.querySelector('path')?.getAttribute('fill')).toBe(`url(#${suffix(steady, 'spec')})`)
+    expect(bright.querySelector('path')?.getAttribute('fill')).toBe(`url(#${suffix(bright, 'hot')})`)
+    expect(steady.getAttribute('mask')).toBe(bright.getAttribute('mask'))
   })
 
   it('operator sees the original glyphs, the rounded plate and its dark lettering', () => {

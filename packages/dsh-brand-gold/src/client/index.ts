@@ -14,6 +14,10 @@
  * removing this plugin hands the slots straight back. Geometry, viewBox and
  * layout footprint are identical to the originals, so the sidebar row never
  * reflows either way.
+ *
+ * The periodic sweep is drawn by a module-level controller (`overlay.ts`) that
+ * both occupants register into; this half only wires the slots and the
+ * diagnostic hook.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the renderer's Context merge (ctx.slots).
@@ -22,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { GoldBrandMark } from './GoldBrandMark.tsx'
 import { GoldBrandName } from './GoldBrandName.tsx'
+import { diag } from './diag.ts'
 
 /** Registrant label shown in the slot ledger. */
 const REGISTRANT = '@linxin666/dsh-client-ui-brand-gold'
@@ -41,6 +46,7 @@ export const inject = ['slots']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  diag.record('plugin.apply')
   ctx.slots.inject('sidebar.brand.mark', () =>
     ctx.slots.inject('sidebar.brand.name', function* () {
       yield ctx.slots.register({ name: 'sidebar.brand.mark', priority: GOLD_PRIORITY, registrant: REGISTRANT }, GoldBrandMark)

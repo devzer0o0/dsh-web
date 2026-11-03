@@ -1,8 +1,13 @@
 /**
  * Material tunables for the gold lockup. Every value here is a dial: the SVG
  * layers read their geometry from the component, and these rules own the
- * measurable extras that CSS can express (edge lighting on the host row,
- * the hover-only reflection sweep, the reduced-motion opt-out).
+ * measurable extras that CSS can express (the palette, the light-theme
+ * overrides, the drop shadow and the reduced-motion opt-out).
+ *
+ * The periodic sweep is not a CSS animation: it runs in the shared controller
+ * and never changes size, position or opacity of these elements. Under
+ * `prefers-reduced-motion: reduce` the controller does not register at all, so
+ * the lockup rests as static polished gold instead of flashing every 5s.
  */
 .root {
   display: inline-flex;
@@ -31,6 +36,8 @@
  * The shell marks a light surface with the absence of body[data-ds-dark-theme].
  * On white the same ramp reads washed out, so the light theme shifts every stop
  * one step deeper while keeping the identical light direction and highlights.
+ * The sweep reads the same properties, so a theme change re-uploads the
+ * material instead of redrawing with the old palette.
  */
 :global(body:not([data-ds-dark-theme])) .root {
   --bg-gold-0: #e0b862;
@@ -52,58 +59,31 @@
 
 .mark,
 .name {
-  display: block;
+  position: relative;
+  display: inline-flex;
   flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The drop shadow stays on the SVG: a filter on the wrapper would flatten the
+   extended-range canvas that sits above it in the top layer. */
+.svg {
+  display: block;
   filter: drop-shadow(0 0.5px 0 rgba(0, 0, 0, 0.55)) drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.28));
 }
 
 /*
- * Two stacked reflection layers. `.gloss` is the steady softbox band that is
- * always visible; `.hot` is a full-white band of the same geometry, hidden
- * until the row is hovered, so hovering raises the specular ceiling instead of
- * re-showing the highlight that is already there.
+ * The steady softbox reflection painted into the SVG itself. It does not move:
+ * the travelling highlight lives in the sweep canvas, so there is exactly one
+ * beam on screen and no hover animation that could add a second one.
  */
-.gloss,
-.hot {
-  transform: translateX(0);
-}
-
-.hot {
-  opacity: 0;
-  transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  /* The host row is the hover surface: the shell's brand button wraps both halves. */
-  :global([class*='_brandIdentity']):hover .gloss,
-  :global([class*='_brandIdentity']):hover .hot {
-    animation: brand-gold-sweep 560ms cubic-bezier(0.32, 0, 0.24, 1) 1 both;
-  }
-
-  :global([class*='_brandIdentity']):hover .hot {
-    opacity: 1;
-  }
-}
-
-/* The band travels across the metal and settles back on the key light. */
-@keyframes brand-gold-sweep {
-  from {
-    transform: translateX(-7%);
-  }
-
-  to {
-    transform: translateX(0);
-  }
+.gloss {
+  transform: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gloss,
-  .hot {
-    animation: none;
+  .gloss {
     transform: none;
-  }
-
-  :global([class*='_brandIdentity']):hover .hot {
-    opacity: 0.7;
   }
 }

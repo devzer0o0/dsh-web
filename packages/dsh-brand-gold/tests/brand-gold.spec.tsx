@@ -3,6 +3,10 @@
  * Brand-gold occupants: the two sidebar brand slots render the original brand
  * vectors with the gold material, without changing geometry or the HARNESS
  * plate's dark lettering.
+ *
+ * The periodic sweep is not asserted from the DOM: both occupants register into
+ * a shared controller, and the sweep itself is timing, geometry and GPU work
+ * that `sweep.spec.ts`, `beam.spec.ts` and `layout.spec.ts` cover directly.
  */
 import type { ComponentType } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,6 +15,8 @@ import { apply } from '../src/client/index.ts'
 import {
   BADGE_RECT,
   BADGE_TEXT_PATHS,
+  MARK_GEOMETRY,
+  NAME_GEOMETRY,
   NAME_VIEWBOX,
   WHALE_HEIGHT,
   WHALE_PATH,
@@ -79,42 +85,43 @@ describe('brand-gold occupants', () => {
     const svg = container.querySelector('svg')
     const painted = [...container.querySelectorAll('g > path')]
     expect(svg?.getAttribute('viewBox')).toBe(`0 0 ${WHALE_WIDTH} ${WHALE_HEIGHT}`)
-    expect(svg?.getAttribute('data-dsh-plugin')).toBe('brand-gold')
-    // Base, counter-light, contact shadow, reflection, hover band, bevel rim —
-    // every one of them the original silhouette, so nothing grows the outline.
+    // The semantic attributes stay on the plugin root, not on the SVG.
+    expect(container.querySelector('[data-dsh-plugin]')?.getAttribute('data-dsh-plugin')).toBe('brand-gold')
+    expect(container.querySelector('[data-dsh-part]')?.getAttribute('data-dsh-part')).toBe('mark')
+    // Base, counter-light, contact shadow, steady reflection, bevel rim: every
+    // one of them the original silhouette, so nothing grows the outline.
     expect(painted.map((node) => node.getAttribute('d'))).toEqual([
       WHALE_PATH,
       WHALE_PATH,
       WHALE_PATH,
       WHALE_PATH,
       WHALE_PATH,
-      WHALE_PATH,
     ])
-    expect(painted[0]?.getAttribute('fill')).toBe('url(#bg-mark-' + painted[0]!.closest('svg')!.querySelector('[id]')!.id.split('-')[2] + '-base)')
+    expect(painted[0]?.getAttribute('fill')).toBe(
+      'url(#bg-mark-' + painted[0]!.closest('svg')!.querySelector('[id]')!.id.split('-')[2] + '-base)',
+    )
     expect(container.querySelector('clipPath path')?.getAttribute('d')).toBe(WHALE_PATH)
   })
 
-  it('operator hovering the row sees the reflection band travel and a brighter band fade in', () => {
-    // Given: the mark occupant rendered with its two reflection layers.
+  it('operator sees a single steady reflection band, with no hover copy underneath', () => {
+    // Given: the mark occupant rendered with its reflection layer.
     const Mark = occupant('sidebar.brand.mark')
-    // When: the markup is inspected before any hover happens.
+    // When: the markup is inspected.
     const { container } = render(<Mark size={24} />)
-    // Then: the steady band is always painted, the brighter one is hidden by CSS
-    // and both are the same geometry, so hover raises the ceiling rather than
-    // re-showing the highlight that is already visible.
+    // Then: exactly one reflection group carries a class, and no second band of
+    // the same geometry is stacked under it — the travelling highlight is drawn
+    // by the sweep canvas instead, so a hover cannot add a second beam.
     const groups = [...container.querySelectorAll('g')].filter((node) => node.hasAttribute('class'))
-    expect(groups.length).toBe(2)
+    expect(groups.length).toBe(1)
     const steady = groups[0]!
-    const bright = groups[1]!
     const ids = [...container.querySelectorAll('[id]')].map((node) => node.id)
-    const suffix = (node: Element, part: string) => {
+    const suffix = (part: string) => {
       const found = [...ids].find((id) => id.endsWith('-' + part))
       if (found === undefined) throw new Error(`gradient "${part}" was not defined`)
       return found
     }
-    expect(steady.querySelector('path')?.getAttribute('fill')).toBe(`url(#${suffix(steady, 'spec')})`)
-    expect(bright.querySelector('path')?.getAttribute('fill')).toBe(`url(#${suffix(bright, 'hot')})`)
-    expect(steady.getAttribute('mask')).toBe(bright.getAttribute('mask'))
+    expect(steady.querySelector('path')?.getAttribute('fill')).toBe(`url(#${suffix('spec')})`)
+    expect(steady.getAttribute('mask')).toBe(`url(#${suffix('mask')})`)
   })
 
   it('operator sees the original glyphs, the rounded plate and its dark lettering', () => {
@@ -153,5 +160,18 @@ describe('brand-gold occupants', () => {
     expect(ids.length).toBeGreaterThan(10)
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids.every((id) => id.startsWith('bg-'))).toBe(true)
+  })
+
+  it('operator sees the sweep register the same vectors the SVGs paint', () => {
+    // Given: the geometry both occupants hand to the shared controller.
+    // When: it is compared with the vector data the SVGs use.
+    // Then: one silhouette for the whale, the glyphs plus the plate for the
+    // name, and the plate lettering excluded so it can never be lit.
+    expect(Object.isFrozen(MARK_GEOMETRY)).toBe(true)
+    expect(MARK_GEOMETRY.paths).toEqual([WHALE_PATH])
+    expect(MARK_GEOMETRY.viewBox).toBe(`0 0 ${WHALE_WIDTH} ${WHALE_HEIGHT}`)
+    expect(NAME_GEOMETRY.paths).toBe(WORDMARK_PATHS)
+    expect(NAME_GEOMETRY.plates).toEqual([{ ...BADGE_RECT }])
+    expect(NAME_GEOMETRY.plateExclusions).toBe(BADGE_TEXT_PATHS)
   })
 })

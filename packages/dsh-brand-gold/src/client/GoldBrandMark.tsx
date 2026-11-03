@@ -83,9 +83,9 @@ export function GoldBrandMark({ size = 24, className }: GoldBrandMarkProps) {
         <linearGradient id={id('spec')} x1="2" y1="10" x2="19" y2="3" gradientUnits="userSpaceOnUse">
           <stop offset="0" stopColor="#FFFDF4" stopOpacity="0" />
           <stop offset="0.3" stopColor="#FFFDF4" stopOpacity="0" />
-          <stop offset="0.37" stopColor="#FFF3CE" stopOpacity="0.55" />
-          <stop offset="0.44" stopColor="#FFFDF6" stopOpacity="1" />
-          <stop offset="0.5" stopColor="#F6D98C" stopOpacity="0.42" />
+          <stop offset="0.37" stopColor="#FFE9B8" stopOpacity="0.5" />
+          <stop offset="0.44" stopColor="#FFF0C6" stopOpacity="0.88" />
+          <stop offset="0.5" stopColor="#F1CE78" stopOpacity="0.4" />
           <stop offset="0.58" stopColor="#FAE8B1" stopOpacity="0" />
           <stop offset="1" stopColor="#FAE8B1" stopOpacity="0" />
         </linearGradient>

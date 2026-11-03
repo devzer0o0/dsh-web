@@ -880,3 +880,24 @@
   align-items: center;
   gap: 4px;
 }
+/* ── Phone trigger pinned to the foot's bottom-right corner ──────────────
+
+   Requested placement (2026-11-03): the pairing trigger sits in the sidebar's
+   bottom-right corner instead of sharing the footer row with the settings and
+   usage entries. The foot area becomes the anchor and this plugin's own
+   `entryRow` is taken out of the flex row, so nothing else in the foot moves.
+   Only the wide column matches: with `data-rail` set (the 56px rail) the row
+   keeps its stacked seat above, where an absolute corner has no room. */
+:global([data-dsh-frame]:not([data-sidebar-collapsed])) [class*='footArea'] {
+  position: relative;
+}
+
+:global([data-dsh-frame]:not([data-sidebar-collapsed])) [class*='footArea'] [class*='entryRow']:not([data-rail]) {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  z-index: 6;
+  flex: none;
+  order: 0;
+  margin: 0;
+}

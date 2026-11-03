@@ -1,0 +1,96 @@
+/**
+ * Material tunables for the gold lockup. Every value here is a dial: the SVG
+ * layers read their geometry from the component, and these rules own the
+ * measurable extras that CSS can express (edge lighting on the host row,
+ * the hover-only reflection sweep, the reduced-motion opt-out).
+ */
+.root {
+  display: inline-flex;
+  align-items: center;
+  overflow: visible;
+
+  /* Palette: dark-surface gold (the shell's default look). */
+  --bg-gold-0: #efcb7c;
+  --bg-gold-1: #e6bc66;
+  --bg-gold-2: #dbad4e;
+  --bg-gold-3: #d3a23c;
+  --bg-gold-4: #c08e2c;
+  --bg-gold-5: #a87728;
+  --bg-gold-6: #8b5d1c;
+  --bg-gold-7: #795019;
+  --bg-gold-plate-0: #f6e3b2;
+  --bg-gold-plate-1: #ebd08c;
+  --bg-gold-plate-2: #ddba63;
+  --bg-gold-plate-3: #cba043;
+  --bg-gold-plate-4: #b07f2c;
+  --bg-gold-plate-5: #8e6120;
+  --bg-gold-ink: #2e2008;
+}
+
+/*
+ * The shell marks a light surface with the absence of body[data-ds-dark-theme].
+ * On white the same ramp reads washed out, so the light theme shifts every stop
+ * one step deeper while keeping the identical light direction and highlights.
+ */
+:global(body:not([data-ds-dark-theme])) .root {
+  --bg-gold-0: #e0b862;
+  --bg-gold-1: #d6ab52;
+  --bg-gold-2: #c99a3f;
+  --bg-gold-3: #bd8d31;
+  --bg-gold-4: #a87a26;
+  --bg-gold-5: #94681f;
+  --bg-gold-6: #7d5618;
+  --bg-gold-7: #6b4714;
+  --bg-gold-plate-0: #ecd49b;
+  --bg-gold-plate-1: #dfc07a;
+  --bg-gold-plate-2: #cfa955;
+  --bg-gold-plate-3: #bb913c;
+  --bg-gold-plate-4: #9d7427;
+  --bg-gold-plate-5: #7d591b;
+  --bg-gold-ink: #2a1c06;
+}
+
+.mark,
+.name {
+  display: block;
+  flex: none;
+  filter: drop-shadow(0 0.5px 0 rgba(0, 0, 0, 0.55)) drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.28));
+}
+
+/* The specular layer fades in only on hover, once, and never moves the layout. */
+.gloss {
+  opacity: 1;
+  transition: opacity 240ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  /* The host row is the hover surface: the shell's brand button wraps both halves. */
+  :global([class*='_brandIdentity']):hover .gloss {
+    animation: brand-gold-sheen 520ms cubic-bezier(0.4, 0, 0.2, 1) 1;
+  }
+}
+
+@keyframes brand-gold-sheen {
+  0% {
+    opacity: 0.72;
+  }
+
+  55% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gloss {
+    transition: none;
+  }
+
+  :global([class*='_brandIdentity']):hover .gloss {
+    animation: none;
+    opacity: 1;
+  }
+}

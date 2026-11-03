@@ -89,6 +89,11 @@
     - id: web-ui-session-archive
       name: '@linxin666/dsh-session-archive'
 
+# from ../dsh-brand-gold
+- insert:
+    - id: web-ui-brand-gold
+      name: '@linxin666/dsh-client-ui-brand-gold'
+
 # from ../dsh-message-edit
 - insert:
     - id: web-ui-message-edit

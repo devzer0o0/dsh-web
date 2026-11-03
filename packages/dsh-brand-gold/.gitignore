@@ -1,0 +1,3 @@
+# lib/ 与 node_modules/ 由构建与本机依赖安装产生，不进版本库（与其它子插件一致）
+lib/
+node_modules/

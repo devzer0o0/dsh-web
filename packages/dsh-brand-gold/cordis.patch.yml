@@ -1,0 +1,6 @@
+# Bundle patch for dsh-brand-gold. Install it as a profile bundle; the row
+# mounts the browser half that fills the sidebar brand slots with the gold
+# rendition of the original whale / wordmark / HARNESS vectors.
+- insert:
+    - id: ui-brand-gold
+      name: '@linxin666/dsh-client-ui-brand-gold'

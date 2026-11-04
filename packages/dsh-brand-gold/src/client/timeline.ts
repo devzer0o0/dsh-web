@@ -84,6 +84,7 @@ export class SweepTimeline {
   private established = false
   private timer: number | undefined
   private armedFor = 0
+  private armedOrigin = 0
   private animation = 0
   private running = false
   private disposed = false
@@ -151,15 +152,29 @@ export class SweepTimeline {
   /** Arm the next start on the existing grid, or leave it as it is. */
   arm(): void {
     if (this.disposed || !this.established) return
+    if (this.running) return
+    // A pending timer is already correct while the grid has not moved: its
+    // target is an absolute grid point, not "in N milliseconds from now".
+    // Touching it is what produced both failure modes — clearing and re-arming
+    // during a scroll storm pushes the start back, and clearing one that is due
+    // but has not run yet (the handler was busy) silently skips that cycle.
+    if (this.timer !== undefined && this.armedOrigin === this.origin) return
     if (this.timer !== undefined) {
       this.clock.clearTimeout(this.timer)
       this.timer = undefined
     }
-    if (this.running) return
     if (!this.sink.canRun()) return
-    const now = this.clock.now()
+    this.armNext(this.clock.now())
+  }
+
+  /**
+   * Arm the first grid point strictly after `now`.
+   * @param now - the current clock reading.
+   */
+  private armNext(now: number): void {
     const next = nextSweepStartAt(now, this.origin, this.params)
     this.armedFor = next
+    this.armedOrigin = this.origin
     this.timer = this.clock.setTimeout(() => {
       this.timer = undefined
       this.fire()
@@ -169,30 +184,28 @@ export class SweepTimeline {
   /** Run the cycle whose window is still open, if there is one. */
   private fire(): void {
     if (this.disposed) return
+    const now = this.clock.now()
+    const due = this.armedFor
+    this.armedFor = 0
     if (!this.sink.canRun()) {
-      this.arm()
+      // Drawing is not allowed right now, so this grid point passes unplayed.
+      this.armNext(now)
       return
     }
-    const now = this.clock.now()
-    const start = joinableCycleStart(now, this.origin, this.params, this.running)
-    if (start === undefined) {
-      // A timer that fired a hair early — before the grid point it was armed
-      // for — is not a missed cycle: it is the very same cycle, one frame
-      // sooner. Wait out the remainder instead of counting a skip.
-      if (this.armedFor > now) {
-        this.arm()
-        return
-      }
-      // Otherwise the window this timer belonged to has already closed, so the
-      // cycle is genuinely missed: record it and arm the next grid point.
+    // The timer was armed for one specific grid point, and that is the cycle to
+    // run as long as its window is still open. Recomputing the grid here would
+    // count a callback that arrived a hair early — or a hair late, past the
+    // window — as a missed cycle and jump a whole period.
+    const window = due > 0 && now - due < this.params.sweepMs ? due : undefined
+    if (window === undefined) {
       this.sink.skipped?.()
-      this.arm()
+      this.armNext(now)
       return
     }
     const info: CycleInfo = {
-      start,
-      index: Math.round((start - this.origin) / this.params.periodMs),
-      late: now - start,
+      start: window,
+      index: Math.round((window - this.origin) / this.params.periodMs),
+      late: now - window,
     }
     this.sink.cycleStart(info)
     this.running = true

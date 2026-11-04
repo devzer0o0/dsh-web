@@ -119,7 +119,10 @@ How the pieces fit:
    returns to exactly the original shape, size, position and colour.
 6. Frames run only inside the 2700 ms window. The rest of the period holds one
    timer; a sweep missed while the page or the lockup was hidden is skipped, not
-   replayed, and a second trigger cannot stack a second loop.
+   replayed, and a second trigger cannot stack a second loop. A pending timer is
+   never cleared and re-armed while the grid is unchanged, and a reposition
+   moves the overlay without re-uploading the material, so scrolling or
+   resizing during a session cannot delay the next start.
 7. The first sweep is armed when the material **and the mask** have been
    uploaded, one delay out, so the first cycle never runs against an empty
    canvas. Ordinary rebuilds keep that grid: only a first initialisation, a

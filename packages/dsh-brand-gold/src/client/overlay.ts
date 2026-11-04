@@ -220,6 +220,12 @@ export class BrandSweepController {
   private canvas: HTMLCanvasElement | undefined
   private renderer: SweepRenderer | undefined
   private layout: LockupLayout | undefined
+  /**
+   * The layout the uploaded material and mask belong to. It only moves when an
+   * upload succeeds, so a reposition (a scroll) cannot make a later rebuild
+   * believe the GPU already holds the new geometry.
+   */
+  private renderedLayout: LockupLayout | undefined
   private mask: MaskImage | undefined
   private maskKey = ''
   private shapes: Map<string, ShapeGeometry> | undefined
@@ -246,7 +252,7 @@ export class BrandSweepController {
   private readonly calibration: Calibration
   private readonly clock: TimelineClock
   private readonly onVisibility = (): void => this.handleVisibility()
-  private readonly onViewport = (): void => this.rebuild('viewport')
+  private readonly onViewport = (): void => this.followViewport()
 
   /**
    * @param params - tunables; the shipped defaults unless a test overrides them.
@@ -393,6 +399,7 @@ export class BrandSweepController {
       this.hide()
       return
     }
+    const unchanged = this.sameLayout(layout)
     this.layout = layout
     diag.record('layout', {
       reason,
@@ -408,6 +415,13 @@ export class BrandSweepController {
     this.place()
     this.show()
     this.publish()
+    // A rebuild that measured the same lockup at the same size has nothing new
+    // to upload: re-uploading it would cancel a running cycle and, under a
+    // stream of scroll or resize events, starve the sweep of its start.
+    if (unchanged && this.ready && this.maskKey === layout.width + 'x' + layout.height) {
+      this.syncTimeline()
+      return
+    }
     void this.upload()
   }
 
@@ -423,6 +437,65 @@ export class BrandSweepController {
     this.shapes = shapes
     this.mask = undefined
     return shapes
+  }
+
+  /**
+   * Follow the lockup when the page scrolls or the window resizes.
+   *
+   * A sidebar sits in the page flow: scrolling moves it, so the overlay has to
+   * move with it. That is a reposition, not a rebuild — re-measuring on every
+   * scroll event would cancel the running sweep and, while a session streams and
+   * scrolls continuously, keep the next one from ever starting.
+   */
+  private followViewport(): void {
+    if (this.disposed) return
+    this.remeasureBoxes()
+    this.place()
+    if (this.ready) this.timeline?.arm()
+  }
+
+  /**
+   * Re-read the occupants' boxes without rebuilding the material.
+   *
+   * Cost is one getBoundingClientRect per occupant plus a layout rebuild: cheap
+   * enough for a scroll handler. The material and the mask are only re-uploaded
+   * when a part actually moved or resized, which is what rebuild() decides.
+   */
+  private remeasureBoxes(): void {
+    const boxes = new Map<string, Box>()
+    const viewBoxes = new Map<string, string>()
+    for (const occupant of this.occupants.values()) {
+      const box = boxOf(occupant.root)
+      if (box === undefined) continue
+      boxes.set(occupant.id, box)
+      viewBoxes.set(occupant.id, occupant.geometry.viewBox)
+    }
+    if (boxes.size === 0) return
+    const shapes = this.shapes ?? this.buildShapes()
+    const dpr = Math.min(window.devicePixelRatio || 1, 3)
+    const layout = buildLayout(boxes, viewBoxes, dpr, this.params, shapes)
+    if (layout !== undefined) this.layout = layout
+  }
+
+  /**
+   * Does a freshly measured layout describe the same lockup in the same place?
+   * @param layout - the layout just measured.
+   * @returns true when no part moved, resized or changed device ratio.
+   */
+  private sameLayout(layout: LockupLayout): boolean {
+    const previous = this.renderedLayout
+    if (previous === undefined || this.mask === undefined) return false
+    if (previous.width !== layout.width || previous.height !== layout.height) return false
+    if (previous.dpr !== layout.dpr) return false
+    if (previous.parts.size !== layout.parts.size) return false
+    for (const [id, part] of layout.parts) {
+      const before = previous.parts.get(id)
+      if (before === undefined) return false
+      if (Math.abs(before.offsetX - part.offsetX) > 0.01) return false
+      if (Math.abs(before.offsetY - part.offsetY) > 0.01) return false
+      if (before.width !== part.width || before.height !== part.height) return false
+    }
+    return true
   }
 
   /**
@@ -628,6 +701,7 @@ export class BrandSweepController {
     this.maskKey = key
     renderer.setMaterial(material)
     renderer.setMask(built)
+    this.renderedLayout = layout
     this.frames = 0
     this.drawPose(this.restPose())
     this.ready = true
@@ -933,6 +1007,7 @@ export class BrandSweepController {
     this.popover = undefined
     this.canvas = undefined
     this.layout = undefined
+    this.renderedLayout = undefined
     this.mask = undefined
     this.maskKey = ''
     this.shapes = undefined

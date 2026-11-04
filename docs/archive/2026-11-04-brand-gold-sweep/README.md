@@ -9,6 +9,18 @@ dark theme, native 24px lockup height.
 | `cycle-frames.png` | Six frames from one recorded cycle: rest, beam entering, whale lit, wordmark lit, HARNESS plate lit, fully restored |
 | `cycle.mp4` | The 16s capture the frames were taken from (60 fps) |
 
+## Dark theme, 1800ms beam
+
+`dark-theme-1800ms.png` is the same widened beam after slowing the sweep from
+1200ms to 1800ms, captured with the system in dark appearance so the shell
+reports `data-ds-dark-theme` and the plugin uses its dark palette.
+
+- Cycle starts 4932-5091ms apart (start-to-start period unchanged at 5000ms).
+- Visible window 1218-1347ms of the 1800ms sweep.
+- Lit region spans up to 134 of 340 columns.
+- Peak response above the resting level: whale +37.3, wordmark +31.3,
+  HARNESS plate +34.3 levels, in that order as the beam crosses.
+
 ## Beam width (after the fivefold widening)
 
 `influenceSigmaRatio` is 0.125, so the soft influence zone is about 1/8 of the

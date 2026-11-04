@@ -18,7 +18,14 @@ export interface SweepParams {
   readonly firstDelayMs: number
   /** Lean of the beam away from vertical, in degrees. */
   readonly tiltDeg: number
-  /** Beam falloff width (sigma) as a fraction of the lockup width. */
+  /**
+   * Beam falloff width (sigma) as a fraction of the lockup width.
+   *
+   * This is the soft influence zone: it drives magnification, lift, the rim and
+   * the shading together. It is deliberately much wider than the specular core
+   * (see `coreSigmaPx`), so the beam reads as a wide lit region rather than a
+   * hairline.
+   */
   readonly influenceSigmaRatio: number
   /** Sigma of the sharp specular core, in CSS pixels (about a 1-2px core). */
   readonly coreSigmaPx: number
@@ -47,7 +54,7 @@ export const SWEEP_PARAMS: SweepParams = Object.freeze({
   sweepMs: 1200,
   firstDelayMs: 5000,
   tiltDeg: 25,
-  influenceSigmaRatio: 0.025,
+  influenceSigmaRatio: 0.125,
   coreSigmaPx: 0.7,
   magnifyPeak: 1.08,
   liftPx: 0.8,

@@ -159,9 +159,15 @@ export function buildLayout(
   const pad = Math.ceil(params.liftPx + 2) + 1
   const width = Math.max(1, Math.round((union.width + pad * 2) * dpr))
   const height = Math.max(1, Math.round((union.height + pad * 2) * dpr))
-  const sigma = Math.max(2, Math.min(union.width * params.influenceSigmaRatio, union.height * 0.5)) * dpr
+  // The height term is only a degenerate-geometry guard: tuning the influence
+  // zone must change the beam width, not get silently clamped back by the
+  // lockup's own height.
+  const sigma = Math.max(2, Math.min(union.width * params.influenceSigmaRatio, union.height * 2)) * dpr
   const centerY = (pad + union.height / 2) * dpr
-  const margin = params.travelMarginPx * dpr
+  // Entry and exit only need the beam to be clear of the lockup by a couple of
+  // sigmas; scaling this with the influence width would otherwise spend a large
+  // share of the 1200ms window travelling outside the lockup.
+  const margin = params.travelMarginPx * dpr + sigma
   const parts = new Map<string, PartTransform>()
   for (const [id, box] of boxes) {
     const viewBox = viewBoxes.get(id)
@@ -175,8 +181,8 @@ export function buildLayout(
     height,
     sigma,
     centerY,
-    startX: (pad - params.travelMarginPx) * dpr - sigma * 3,
-    endX: (pad + union.width + params.travelMarginPx) * dpr + sigma * 3,
+    startX: (pad - params.travelMarginPx) * dpr - margin,
+    endX: (pad + union.width + params.travelMarginPx) * dpr + margin,
     pad,
     parts,
   }

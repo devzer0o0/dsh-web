@@ -3,7 +3,7 @@
  *
  * A cycle starts at `origin + cycleIndex * periodMs`. The timeline never adds
  * "the sweep that just played" to "the wait that follows it" — that arithmetic
- * is what turned a 3000 ms cadence into a 6000 ms one — and it never runs a
+ * is what once turned a cadence into double it — and it never runs a
  * `setInterval`, so a slow frame cannot stack a second loop on top of the
  * first. Between windows there is exactly one pending timeout and no animation
  * frame at all.

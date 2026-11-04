@@ -10,7 +10,7 @@
  * Timing is an **absolute grid**: a cycle starts at
  * `origin + cycleIndex * periodMs`, and the controller only ever looks up which
  * cycle it is in. It never adds "this sweep" to "the wait after it", which is
- * how a 3000 ms cadence turns into a 6000 ms one. A late timer resumes the cycle
+ * how a cadence turns into one twice as long. A late timer resumes the cycle
  * it belongs to; a timer that fires after the window closed skips the missed
  * cycles instead of replaying them.
  *

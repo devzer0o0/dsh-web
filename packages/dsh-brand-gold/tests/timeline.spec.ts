@@ -3,7 +3,7 @@
  * the absence of leftover loops.
  *
  * Nothing here waits for a real frame. The clock is a queue the test advances by
- * hand, so "a sweep starts every 3000 ms" is observed as a fact about the
+ * hand, so "a sweep starts every period" is observed as a fact about the
  * timeline rather than as a hope about a browser.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -163,12 +163,13 @@ describe('cycle lifecycle', () => {
     timeline.dispose()
   })
 
-  it('operator sees starts exactly 3000 ms apart for five cycles', () => {
+  it('operator sees starts exactly one period apart for five cycles', () => {
     // Given: a running timeline.
     const { clock, timeline, starts } = run()
     // When: it is left to run for five periods plus a margin.
     clock.advance(SWEEP_PARAMS.firstDelayMs + SWEEP_PARAMS.periodMs * 5 - 1, 8)
-    // Then: the starts are the grid itself — 3000 ms apart, never 5700 or 6000.
+    // Then: the starts are the grid itself — one period apart, never one period
+    // plus a window, which is the drift this timeline replaced.
     expect(starts.length).toBe(5)
     for (let index = 1; index < starts.length; index += 1) {
       expect(starts[index]! - starts[index - 1]!).toBe(SWEEP_PARAMS.periodMs)
@@ -178,13 +179,13 @@ describe('cycle lifecycle', () => {
     timeline.dispose()
   })
 
-  it('operator sees a 2700 ms animation and a 300 ms rest inside every period', () => {
+  it('operator sees the motion window and the rest fill every period', () => {
     // Given: a running timeline and its frame log.
     const { clock, timeline, frameTimes, restTimes, starts } = run()
     // When: two cycles run.
     clock.advance(SWEEP_PARAMS.firstDelayMs + SWEEP_PARAMS.periodMs * 2 + 400, 8)
-    // Then: the frames cover 0..2700 ms of the cycle and stop, and the rest is
-    // painted once, 300 ms before the next start.
+    // Then: the frames cover the motion window and stop, and the rest is painted
+    // once, exactly the rest gap before the next start.
     expect(frameTimes.length).toBeGreaterThan(50)
     expect(Math.max(...frameTimes)).toBeLessThanOrEqual(SWEEP_PARAMS.sweepMs + 8)
     expect(Math.min(...frameTimes)).toBeLessThan(20)

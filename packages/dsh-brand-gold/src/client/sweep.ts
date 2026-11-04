@@ -1,11 +1,11 @@
 /**
  * Sweep timing and the tunable dials behind the brand highlight.
  *
- * "Every three seconds" is a **start-to-start** period, not "play, then wait":
+ * "Every five seconds" is a **start-to-start** period, not "play, then wait":
  * a cycle begins at `origin + cycleIndex * periodMs` and the window inside it
- * is 2700 ms (entry, body, exit), so the lockup rests for the remaining 300 ms.
- * Nothing re-accumulates "play time + wait time", which is what turned a 3000 ms
- * request into a 6000 ms one in the previous round.
+ * is 2700 ms (entry, body, exit), so the lockup rests for the remaining 2300 ms.
+ * Nothing re-accumulates "play time + wait time", which is what once turned a
+ * three-second request into a six-second one.
  *
  * Widths are expressed as a **visible** full width at half maximum, on a
  * horizontal cross-section of the lockup, in CSS pixels. `beam.ts` owns the
@@ -94,17 +94,17 @@ export interface SweepParams {
  * with a 0.10 x W core, clamped to 12..24 CSS px, gives a 103 px band and a
  * 19 px core on the shipped 188 px lockup.
  *
- * Timing: 250 + 2200 + 250 = 2700 ms of motion inside a 3000 ms period, so the
- * lockup rests for 300 ms and the next sweep starts exactly 3000 ms after the
+ * Timing: 250 + 2200 + 250 = 2700 ms of motion inside a 5000 ms period, so the
+ * lockup rests for 2300 ms and the next sweep starts exactly 5000 ms after the
  * previous one started.
  */
 export const SWEEP_PARAMS: SweepParams = Object.freeze({
-  periodMs: 3000,
+  periodMs: 5000,
   entryMs: 250,
   surfaceMs: 2200,
   exitMs: 250,
   sweepMs: 2700,
-  firstDelayMs: 3000,
+  firstDelayMs: 5000,
   tiltDeg: 25,
   mainBandFwhmRatio: 0.55,
   coreFwhmRatio: 0.1,

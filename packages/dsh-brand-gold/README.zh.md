@@ -9,7 +9,7 @@
 
 纯浏览器半区的 DSH Web GUI 插件：它填充 shell 声明的两个侧栏品牌槽位
 （`sidebar.brand.mark` 与 `sidebar.brand.name`），用原始 DeepSeek Harness 品牌
-矢量绘制抛光黄金版本，并每 3 秒让一道斜向光束扫过整个品牌组合。
+矢量绘制抛光黄金版本，并每 5 秒让一道斜向光束扫过整个品牌组合。
 
 ## 它是什么
 
@@ -30,10 +30,10 @@
 
 | 参数 | 取值 | 位置 |
 |---|---|---|
-| 周期（本轮开始到下一轮开始） | 3000 ms | `SWEEP_PARAMS.periodMs` |
+| 周期（本轮开始到下一轮开始） | 5000 ms | `SWEEP_PARAMS.periodMs` |
 | 单次可见窗口 | 2700 ms | `SWEEP_PARAMS.sweepMs` |
-| 周期内静止 | 300 ms | `periodMs - sweepMs` |
-| 材质就绪后首次扫光 | 3000 ms | `SWEEP_PARAMS.firstDelayMs` |
+| 周期内静止 | 2300 ms | `periodMs - sweepMs` |
+| 材质就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | A 段 入场 | 250 ms | `SWEEP_PARAMS.entryMs` |
 | B 段 遍历金属 | 2200 ms | `SWEEP_PARAMS.surfaceMs` |
 | C 段 退场 | 250 ms | `SWEEP_PARAMS.exitMs` |

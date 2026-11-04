@@ -1,6 +1,6 @@
 /**
- * Sweep timing: the period is start-to-start on an absolute grid, the window is
- * 2700 ms inside a 3000 ms period, and the rest of the period runs no frame.
+ * Sweep timing: the period is start-to-start on an absolute grid, the motion is
+ * 2700 ms inside a 5000 ms period, and the rest of the period runs no frame.
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -31,20 +31,22 @@ const layout = buildLayout(
 )!
 
 describe('sweep cadence', () => {
-  it('operator sees a sweep start every 3000 ms, not every 6000 ms', () => {
+  it('operator sees a sweep start every five seconds, not every eight', () => {
     // Given: the shipped tunables.
-    // When: four consecutive starts on the grid are read.
-    const origin = 3000
+    // When: five consecutive starts on the grid are read.
+    const origin = SWEEP_PARAMS.firstDelayMs
     const starts = [0, 1, 2, 3, 4].map((cycle) => origin + cycle * SWEEP_PARAMS.periodMs)
     // Then: adjacent starts are exactly one period apart, and the window plus
     // the rest fills that period without a gap or an overlap.
-    expect(SWEEP_PARAMS.periodMs).toBe(3000)
+    expect(SWEEP_PARAMS.periodMs).toBe(5000)
+    expect(SWEEP_PARAMS.firstDelayMs).toBe(SWEEP_PARAMS.periodMs)
     expect(SWEEP_PARAMS.sweepMs).toBe(2700)
-    expect(SWEEP_PARAMS.firstDelayMs).toBe(3000)
-    expect(starts[1]! - starts[0]!).toBe(3000)
-    expect(starts[2]! - starts[1]!).toBe(3000)
-    expect(starts[4]! - starts[3]!).toBe(3000)
-    expect(idleMs(SWEEP_PARAMS)).toBe(300)
+    for (let index = 1; index < starts.length; index += 1) {
+      expect(starts[index]! - starts[index - 1]!).toBe(SWEEP_PARAMS.periodMs)
+    }
+    // The motion inside the period is unchanged; only the rest between sweeps
+    // grew, so the sweep itself is not slowed down or speeded up.
+    expect(idleMs(SWEEP_PARAMS)).toBe(SWEEP_PARAMS.periodMs - SWEEP_PARAMS.sweepMs)
     expect(SWEEP_PARAMS.sweepMs + idleMs(SWEEP_PARAMS)).toBe(SWEEP_PARAMS.periodMs)
   })
 
@@ -68,7 +70,7 @@ describe('sweep cadence', () => {
 
   it('operator gets an invalid cadence rejected instead of played', () => {
     // Given: dial sets that cannot schedule a sweep.
-    const overlap: SweepParams = { ...SWEEP_PARAMS, sweepMs: 3000 }
+    const overlap: SweepParams = { ...SWEEP_PARAMS, sweepMs: SWEEP_PARAMS.periodMs }
     const mismatched: SweepParams = { ...SWEEP_PARAMS, exitMs: 500 }
     const zeroStage: SweepParams = { ...SWEEP_PARAMS, surfaceMs: 0 }
     // When: they are validated.
@@ -98,12 +100,13 @@ describe('sweep cadence', () => {
     const origin = 1000
     // When: the next start is computed from a late reading.
     const late = origin + SWEEP_PARAMS.periodMs * 3 + SWEEP_PARAMS.sweepMs + 300
+    // Three whole periods plus a closed window, so it lies in the fourth.
     // Then: the next start is the following grid point, never the missed one,
     // and the grid itself did not move.
-    expect(nextSweepStartAt(late, origin)).toBe(origin + SWEEP_PARAMS.periodMs * 5)
+    expect(nextSweepStartAt(late, origin)).toBe(origin + Math.floor((late - origin) / SWEEP_PARAMS.periodMs) * SWEEP_PARAMS.periodMs + SWEEP_PARAMS.periodMs)
     expect(nextSweepStartAt(origin, origin)).toBe(origin + SWEEP_PARAMS.periodMs)
     expect(nextSweepStartAt(origin - 200, origin)).toBe(origin)
-    expect(cycleStartAt(late, origin)).toBe(origin + SWEEP_PARAMS.periodMs * 4)
+    expect(cycleStartAt(late, origin)).toBe(origin + Math.floor((late - origin) / SWEEP_PARAMS.periodMs) * SWEEP_PARAMS.periodMs)
   })
 
   it('operator gets a skipped cycle, not a burst of catch-up cycles', () => {

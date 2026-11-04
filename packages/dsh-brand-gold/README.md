@@ -10,7 +10,7 @@ English | [中文](README.zh.md)
 A pure browser-half DSH Web GUI plugin: it fills the two sidebar brand slots the
 shell declares (`sidebar.brand.mark` and `sidebar.brand.name`) with a
 polished-gold rendition of the original DeepSeek Harness brand vectors, and runs
-one diagonal beam across the whole lockup every 3 seconds.
+one diagonal beam across the whole lockup every 5 seconds.
 
 ## What it is
 
@@ -39,10 +39,10 @@ One beam, one timeline, one canvas, shared by both occupants.
 
 | Dial | Value | Where |
 |---|---|---|
-| Period, start to start | 3000 ms | `SWEEP_PARAMS.periodMs` |
+| Period, start to start | 5000 ms | `SWEEP_PARAMS.periodMs` |
 | Visible window | 2700 ms | `SWEEP_PARAMS.sweepMs` |
-| Rest inside the period | 300 ms | `periodMs - sweepMs` |
-| First sweep after the material is ready | 3000 ms | `SWEEP_PARAMS.firstDelayMs` |
+| Rest inside the period | 2300 ms | `periodMs - sweepMs` |
+| First sweep after the material is ready | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | Stage A, entry | 250 ms | `SWEEP_PARAMS.entryMs` |
 | Stage B, over the metal | 2200 ms | `SWEEP_PARAMS.surfaceMs` |
 | Stage C, exit | 250 ms | `SWEEP_PARAMS.exitMs` |

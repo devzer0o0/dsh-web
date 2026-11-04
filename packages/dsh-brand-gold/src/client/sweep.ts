@@ -31,6 +31,12 @@ export interface SweepParams {
   readonly coreSigmaPx: number
   /** Peak local magnification at the beam centre. */
   readonly magnifyPeak: number
+  /**
+   * Radius, in CSS pixels, inside which magnification pulls material. The
+   * influence zone can be far wider than this without ghosting, because the
+   * optical effect is local even when the light is broad.
+   */
+  readonly magnifyRadiusPx: number
   /** Peak upward lift at the beam centre, in CSS pixels. */
   readonly liftPx: number
   /** Extra linear gain applied to the metal under the beam. */
@@ -54,9 +60,10 @@ export const SWEEP_PARAMS: SweepParams = Object.freeze({
   sweepMs: 1800,
   firstDelayMs: 5000,
   tiltDeg: 25,
-  influenceSigmaRatio: 0.125,
+  influenceSigmaRatio: 1.25,
   coreSigmaPx: 0.7,
   magnifyPeak: 1.08,
+  magnifyRadiusPx: 5,
   liftPx: 0.8,
   metalGain: 0.55,
   coreGain: 1.2,

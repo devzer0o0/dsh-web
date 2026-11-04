@@ -74,6 +74,8 @@ export interface LockupLayout {
   readonly height: number
   /** Beam falloff width (sigma) in device pixels. */
   readonly sigma: number
+  /** Radius of the local magnification, in device pixels. */
+  readonly magnifyRadiusPx: number
   /** Vertical centre the beam tilt is measured from, in device pixels. */
   readonly centerY: number
   /** First beam centre, in device pixels (left of the lockup). */
@@ -159,10 +161,11 @@ export function buildLayout(
   const pad = Math.ceil(params.liftPx + 2) + 1
   const width = Math.max(1, Math.round((union.width + pad * 2) * dpr))
   const height = Math.max(1, Math.round((union.height + pad * 2) * dpr))
-  // The height term is only a degenerate-geometry guard: tuning the influence
-  // zone must change the beam width, not get silently clamped back by the
-  // lockup's own height.
-  const sigma = Math.max(2, Math.min(union.width * params.influenceSigmaRatio, union.height * 2)) * dpr
+  // The only cap is a numerical sanity bound on the width itself. It used to be
+  // clamped by the lockup height, which silently ate the dial: a sigma wider
+  // than the lockup is a legitimate (if extreme) setting and must reach the
+  // shader as configured.
+  const sigma = Math.max(2, Math.min(union.width * params.influenceSigmaRatio, union.width * 4)) * dpr
   const centerY = (pad + union.height / 2) * dpr
   // Entry and exit only need the beam to be clear of the lockup by a couple of
   // sigmas; scaling this with the influence width would otherwise spend a large
@@ -180,6 +183,7 @@ export function buildLayout(
     width,
     height,
     sigma,
+    magnifyRadiusPx: params.magnifyRadiusPx * dpr,
     centerY,
     startX: (pad - params.travelMarginPx) * dpr - margin,
     endX: (pad + union.width + params.travelMarginPx) * dpr + margin,

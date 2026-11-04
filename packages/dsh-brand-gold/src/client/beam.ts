@@ -7,6 +7,12 @@
  * @module dsh-brand-gold/beam
  */
 
+/**
+ * Radius, in CSS pixels, inside which the magnification actually pulls
+ * material. The influence zone is a wide light, but a magnification that scaled
+ * with its full width would sample material tens of pixels away and ghost the
+ * stroke; the optical effect is local by nature.
+ */
 /** A point in canvas CSS pixels. */
 export interface Point {
   /** Horizontal position. */
@@ -29,6 +35,8 @@ export interface BeamSpec {
   readonly liftPx: number
   /** Peak magnification at the beam centre. */
   readonly magnifyPeak: number
+  /** Radius, in CSS pixels, inside which magnification pulls material. */
+  readonly magnifyRadiusPx: number
 }
 
 /**
@@ -84,7 +92,9 @@ export function warpOffset(point: Point, beam: BeamSpec): Point {
   const ny = beam.tanTilt / normalLength
   const distance = (point.x - beam.centerX) * nx + (point.y - beam.centerY) * ny
   const scale = 1 + (beam.magnifyPeak - 1) * weight
-  const radial = distance * (1 / scale - 1)
+  // Bounded neighbourhood: beyond it the material is not magnified, only lit.
+  const local = Math.max(-beam.magnifyRadiusPx, Math.min(distance, beam.magnifyRadiusPx))
+  const radial = local * (1 / scale - 1)
   return { x: nx * radial, y: ny * radial - beam.liftPx * weight }
 }
 

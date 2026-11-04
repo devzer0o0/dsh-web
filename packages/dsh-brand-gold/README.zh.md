@@ -36,7 +36,8 @@
 | 就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | 方向 | 仅从左向右 | `overlay.ts`（`startX` 到 `endX`） |
 | 相对竖直倾斜 | 25 度 | `SWEEP_PARAMS.tiltDeg` |
-| 影响区宽度 | 每侧约组合宽度的 5% | `SWEEP_PARAMS.influenceSigmaRatio` |
+| 影响区宽度 | 组合宽度的 125%（σ） | `SWEEP_PARAMS.influenceSigmaRatio` |
+| 放大作用半径 | 5 CSS px | `SWEEP_PARAMS.magnifyRadiusPx` |
 | 高光核心 | 约 1-2 CSS px | `SWEEP_PARAMS.coreSigmaPx` |
 | 局部放大峰值 | 1.08 倍 | `SWEEP_PARAMS.magnifyPeak` |
 | 局部浮起峰值 | 0.8 CSS px | `SWEEP_PARAMS.liftPx` |

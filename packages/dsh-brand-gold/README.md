@@ -45,7 +45,8 @@ One beam, one timeline, one canvas, shared by both occupants.
 | First sweep after ready | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | Direction | left to right only | `overlay.ts` (`startX` to `endX`) |
 | Lean off vertical | 25 deg | `SWEEP_PARAMS.tiltDeg` |
-| Influence width | about 5% of the lockup per side | `SWEEP_PARAMS.influenceSigmaRatio` |
+| Influence width | 125% of the lockup width (sigma) | `SWEEP_PARAMS.influenceSigmaRatio` |
+| Magnification radius | 5 CSS px | `SWEEP_PARAMS.magnifyRadiusPx` |
 | Highlight core | about 1-2 CSS px | `SWEEP_PARAMS.coreSigmaPx` |
 | Local magnification | 1.08x peak | `SWEEP_PARAMS.magnifyPeak` |
 | Local lift | 0.8 CSS px peak | `SWEEP_PARAMS.liftPx` |

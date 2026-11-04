@@ -9,6 +9,23 @@ dark theme, native 24px lockup height.
 | `cycle-frames.png` | Six frames from one recorded cycle: rest, beam entering, whale lit, wordmark lit, HARNESS plate lit, fully restored |
 | `cycle.mp4` | The 16s capture the frames were taken from (60 fps) |
 
+## Pooled beam: influence zone at 10x
+
+`influenceSigmaRatio` 0.125 -> 1.25, so the sigma is wider than the lockup and
+the light pools over the whole lockup at once instead of crossing it as a band.
+
+`pooled-beam-10x.png` is the result after the fix below. Measured on the
+400px-wide lockup: lit span up to 375 of 400 columns, cycle starts 4899-5057ms
+apart, windows 1301-1405ms of the 1800ms sweep.
+
+Widening the sigma by itself produced visible ghosting: the radial magnification
+term scaled with the beam width, so at sigma 850px a pixel was pulled about 24px
+along the radius and sampled a neighbouring stroke, doubling every letter. The
+magnification is now bounded to a local radius (`SWEEP_PARAMS.magnifyRadiusPx`,
+5 CSS px) in both the shader and `beam.ts`: the light can be arbitrarily wide,
+but the optical pull stays local. The layout sigma is also no longer clamped by
+the lockup height, which had been silently capping it.
+
 ## Dark theme, 1800ms beam
 
 `dark-theme-1800ms.png` is the same widened beam after slowing the sweep from

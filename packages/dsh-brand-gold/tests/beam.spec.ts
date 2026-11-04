@@ -21,6 +21,7 @@ const beam: BeamSpec = {
   sigma: 8,
   liftPx: 0.8,
   magnifyPeak: 1.08,
+  magnifyRadiusPx: 5,
 }
 
 describe('beam geometry', () => {
@@ -51,6 +52,19 @@ describe('beam geometry', () => {
     // weight is zero, so untouched strokes never change size.
     expect(magnifyAt({ x: 100, y: 25 }, beam)).toBeCloseTo(1.08, 6)
     expect(magnifyAt({ x: 160, y: 25 }, beam)).toBe(1)
+  })
+
+  it('operator sees no ghosting when the influence zone is far wider than the lockup', () => {
+    // Given: a very wide beam, as produced by a large influence sigma.
+    const wide: BeamSpec = { ...beam, sigma: 850, magnifyRadiusPx: 5 }
+    // When: the displacement is read far from the axis, where a magnification
+    // that scaled with the full width would sample material tens of pixels away.
+    const far = warpOffset({ x: 400, y: 25 }, wide)
+    // Then: the optical displacement stays inside the bounded neighbourhood, so
+    // the shader cannot pull a distant stroke into this one and double its edge.
+    expect(Math.abs(far.x)).toBeLessThan(1)
+    const near = warpOffset({ x: 103, y: 25 }, wide)
+    expect(Math.abs(near.x)).toBeLessThan(1)
   })
 
   it('operator sees the lifted surface rise upward and settle back, never sideways drift', () => {

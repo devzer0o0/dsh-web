@@ -50,6 +50,8 @@ struct Params {
   light: vec4f,
   // x: magnification, y: plate factor, z: rim gain, w: shade gain
   warp: vec4f,
+  // x: local magnification radius in device px
+  warpEdge: vec4f,
   // x: plate centre x, y: plate centre y, z: plate half w, w: plate half h
   plate: vec4f,
   // x: plate radius
@@ -110,7 +112,10 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let weight = influence(src);
     let along = (src.x - params.beam.x) * nx + (src.y - params.frame.z) * ny;
     let scale = 1.0 + (params.warp.x - 1.0) * weight;
-    let radial = along * (1.0 / scale - 1.0);
+    // Bounded neighbourhood, mirroring MAGNIFY_RADIUS_PX in beam.ts: the light
+    // can be wide, but magnification must not sample material far away.
+    let local = clamp(along, -params.warpEdge.x, params.warpEdge.x);
+    let radial = local * (1.0 / scale - 1.0);
     src = px - vec2f(nx * radial, ny * radial - params.frame.w * weight);
   }
 
@@ -212,8 +217,8 @@ function peakHalfFloat(words: Uint16Array, bytesPerRow: number, width: number, h
   return peak
 }
 
-/** Uniform payload size in bytes (6 vec4 slots). */
-const UNIFORM_BYTES = 6 * 16
+/** Uniform payload size in bytes (7 vec4 slots). */
+const UNIFORM_BYTES = 7 * 16
 
 /** HARNESS plate rectangle in canvas pixels. */
 export interface PlateRect {
@@ -322,6 +327,7 @@ export function createRenderer(
       layout.width, layout.height, layout.centerY, params.liftPx * layout.dpr,
       frame.sweep, params.coreSigmaPx * layout.dpr, params.coreGain, params.hdrGain,
       params.magnifyPeak, params.plateFactor, 0.26, 0.16,
+      layout.magnifyRadiusPx, 0, 0, 0,
       plate === undefined ? 0 : plate.x + plate.width / 2,
       plate === undefined ? 0 : plate.y + plate.height / 2,
       plate === undefined ? 0 : plate.width / 2,

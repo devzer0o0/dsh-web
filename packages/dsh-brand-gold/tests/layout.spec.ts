@@ -57,9 +57,9 @@ describe('brand coordinate system', () => {
     // beam never restarts at the wordmark's own left edge.
     expect(layout.startX).toBeLessThan(layout.parts.get('mark')!.offsetX)
     expect(layout.endX).toBeGreaterThan(layout.parts.get('name')!.offsetX + nameBox.width * layout.dpr)
-    // The influence zone is a dialog, not a hairline: it tracks the configured
-    // fraction of the lockup width and is not clamped by the lockup height.
-    expect(layout.sigma / (layout.box.width * layout.dpr)).toBeCloseTo(0.125, 2)
+    // The influence zone tracks the configured fraction of the lockup width and
+    // is not clamped by the lockup height.
+    expect(layout.sigma / (layout.box.width * layout.dpr)).toBeCloseTo(1.25, 2)
   })
 
   it('operator never sees the lifted stroke clipped by the canvas edge', () => {

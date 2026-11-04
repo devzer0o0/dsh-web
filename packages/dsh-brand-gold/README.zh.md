@@ -31,8 +31,8 @@
 | 参数 | 取值 | 位置 |
 |---|---|---|
 | 周期（本轮开始到下一轮开始） | 5000 ms | `SWEEP_PARAMS.periodMs` |
-| 单次可见扫光 | 1200 ms | `SWEEP_PARAMS.sweepMs` |
-| 周期内静止 | 3800 ms | `periodMs - sweepMs` |
+| 单次可见扫光 | 1800 ms | `SWEEP_PARAMS.sweepMs` |
+| 周期内静止 | 3200 ms | `periodMs - sweepMs` |
 | 就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | 方向 | 仅从左向右 | `overlay.ts`（`startX` 到 `endX`） |
 | 相对竖直倾斜 | 25 度 | `SWEEP_PARAMS.tiltDeg` |
@@ -56,7 +56,7 @@
    采样空洞、新旧轮廓双影或被裁掉的笔画。
 4. 画布在光束之外完全透明。静止时屏幕上只有下方那张 SVG，因此不存在两份轮廓叠加，扫光结束
    后形状、大小、位置与颜色精确恢复。
-5. 逐帧绘制只发生在 1200 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
+5. 逐帧绘制只发生在 1800 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
    的那一轮直接跳过、不补播，也不会出现重叠循环。
 
 `prefers-reduced-motion: reduce` 下完全不注册：没有位移、没有放大、没有周期性强闪，

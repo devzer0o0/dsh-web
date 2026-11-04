@@ -51,7 +51,7 @@ export interface SweepParams {
  */
 export const SWEEP_PARAMS: SweepParams = Object.freeze({
   periodMs: 5000,
-  sweepMs: 1200,
+  sweepMs: 1800,
   firstDelayMs: 5000,
   tiltDeg: 25,
   influenceSigmaRatio: 0.125,

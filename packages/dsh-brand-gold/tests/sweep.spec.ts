@@ -17,11 +17,13 @@ describe('sweep timing', () => {
     expect(starts[1]! - starts[0]!).toBe(5000)
     expect(starts[2]! - starts[1]!).toBe(5000)
     expect(SWEEP_PARAMS.firstDelayMs).toBe(5000)
-    // A sweep never becomes "play 1200ms, then wait 5000ms".
-    expect(SWEEP_PARAMS.periodMs - SWEEP_PARAMS.sweepMs).toBe(3800)
+    // A sweep never becomes "play, then wait 5000ms": the window is a slice of
+    // the period, so slowing the beam shortens the rest instead of the period.
+    expect(SWEEP_PARAMS.sweepMs).toBe(1800)
+    expect(SWEEP_PARAMS.periodMs - SWEEP_PARAMS.sweepMs).toBe(3200)
   })
 
-  it('operator sees the beam move only inside its 1200ms window', () => {
+  it('operator sees the beam move only inside its 1800ms window', () => {
     // Given: the shipped tunables.
     const { periodMs, sweepMs } = SWEEP_PARAMS
     const origin = 0

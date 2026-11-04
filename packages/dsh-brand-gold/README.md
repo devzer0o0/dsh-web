@@ -40,8 +40,8 @@ One beam, one timeline, one canvas, shared by both occupants.
 | Dial | Value | Where |
 |---|---|---|
 | Period, start to start | 5000 ms | `SWEEP_PARAMS.periodMs` |
-| Visible sweep | 1200 ms | `SWEEP_PARAMS.sweepMs` |
-| Rest inside the period | 3800 ms | `periodMs - sweepMs` |
+| Visible sweep | 1800 ms | `SWEEP_PARAMS.sweepMs` |
+| Rest inside the period | 3200 ms | `periodMs - sweepMs` |
 | First sweep after ready | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | Direction | left to right only | `overlay.ts` (`startX` to `endX`) |
 | Lean off vertical | 25 deg | `SWEEP_PARAMS.tiltDeg` |
@@ -72,7 +72,7 @@ How the pieces fit:
 4. The canvas is fully transparent outside the beam. At rest the SVG underneath
    is the only lockup on screen, so nothing is ever drawn twice and the sweep
    returns to exactly the original shape, size, position and colour.
-5. Frames run only inside the 1200 ms window. The rest of the period holds one
+5. Frames run only inside the 1800 ms window. The rest of the period holds one
    timer; a sweep missed while the page or the lockup was hidden is skipped, not
    replayed, and a second trigger cannot stack a second loop.
 

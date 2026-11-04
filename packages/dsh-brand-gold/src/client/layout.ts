@@ -166,7 +166,7 @@ export function buildLayout(
   const centerY = (pad + union.height / 2) * dpr
   // Entry and exit only need the beam to be clear of the lockup by a couple of
   // sigmas; scaling this with the influence width would otherwise spend a large
-  // share of the 1200ms window travelling outside the lockup.
+  // share of the sweep window travelling outside the lockup.
   const margin = params.travelMarginPx * dpr + sigma
   const parts = new Map<string, PartTransform>()
   for (const [id, box] of boxes) {

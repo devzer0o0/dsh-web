@@ -10,7 +10,7 @@ English | [中文](README.zh.md)
 A pure browser-half DSH Web GUI plugin: it fills the two sidebar brand slots the
 shell declares (`sidebar.brand.mark` and `sidebar.brand.name`) with a
 polished-gold rendition of the original DeepSeek Harness brand vectors, and runs
-one diagonal beam across the whole lockup every 5 seconds.
+one diagonal beam across the whole lockup every 3 seconds.
 
 ## What it is
 
@@ -39,15 +39,21 @@ One beam, one timeline, one canvas, shared by both occupants.
 
 | Dial | Value | Where |
 |---|---|---|
-| Period, start to start | 5000 ms | `SWEEP_PARAMS.periodMs` |
-| Visible window | 3600 ms | `SWEEP_PARAMS.sweepMs` |
-| Rest inside the period | 1400 ms | `periodMs - sweepMs` |
-| First sweep after the material is ready | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
-| Direction | left to right only | `overlay.ts` (`startX` to `endX`) |
+| Period, start to start | 3000 ms | `SWEEP_PARAMS.periodMs` |
+| Visible window | 2700 ms | `SWEEP_PARAMS.sweepMs` |
+| Rest inside the period | 300 ms | `periodMs - sweepMs` |
+| First sweep after the material is ready | 3000 ms | `SWEEP_PARAMS.firstDelayMs` |
+| Stage A, entry | 250 ms | `SWEEP_PARAMS.entryMs` |
+| Stage B, over the metal | 2200 ms | `SWEEP_PARAMS.surfaceMs` |
+| Stage C, exit | 250 ms | `SWEEP_PARAMS.exitMs` |
+| Direction | left to right only | `trajectory.ts` (`centerStart` to `centerEnd`) |
 | Lean off vertical | 25 deg | `SWEEP_PARAMS.tiltDeg` |
 | Wide gold band, FWHM | 0.55 x lockup width | `SWEEP_PARAMS.mainBandFwhmRatio` |
 | Champagne core, FWHM | clamp(0.10 x W, 12, 24) CSS px | `SWEEP_PARAMS.coreFwhmRatio`, `coreFwhmMinPx`, `coreFwhmMaxPx` |
-| Entry and exit travel | 0.10 x W + tilt compensation | `SWEEP_PARAMS.travelMarginRatio`, `layout.ts` |
+| Finite band support | 3 sigma, windowed to zero | `SWEEP_PARAMS.supportSigmas`, `beam.ts` |
+| Entry and exit travel | one full support radius past the outer metal | `layout.ts` (`centerStart`, `centerEnd`) |
+| Metal eligibility | geometric mask, never brightness | `geometry-mask.ts`, `surface.ts` |
+| Band albedo floor | 0.22 linear | `SWEEP_PARAMS.bandAlbedoFloor` |
 | Local magnification | 1.08x peak, 5 CSS px radius | `SWEEP_PARAMS.magnifyPeak`, `magnifyRadiusPx` |
 | Local lift | 0.8 CSS px peak | `SWEEP_PARAMS.liftPx` |
 | HARNESS plate response | 55% of the metal | `SWEEP_PARAMS.plateFactor` |
@@ -71,10 +77,12 @@ Measured on the shipped 188 x 24 CSS px lockup at DPR 2:
 | Canvas | 392 x 64 device px |
 | Wide band FWHM | 103.4 CSS px |
 | Core FWHM | 18.8 CSS px |
-| Travel | 496.8 device px = 248.4 CSS px |
-| Centre crossing the lockup body | 2725 ms |
-| Centre speed | about 69 CSS px/s |
-| Envelope fade in / out | 504 ms / 576 ms |
+| Band support radius | 186.3 CSS px |
+| Metal extent along the beam | 3.3 .. 194.1 CSS px |
+| Centre travel | -187.0 .. 384.4 CSS px |
+| Centre crossing the metal | 2200 ms (stage B) |
+| Centre speed over the metal | about 87 CSS px/s |
+| Envelope | opens over 250 ms, full from the first surface to the last, closes after the tail leaves |
 
 How the pieces fit:
 
@@ -82,25 +90,40 @@ How the pieces fit:
    each one's own viewBox into a single canvas coordinate system. The two
    viewBoxes are never treated as one space, and the beam crosses the gap
    between the icon and the wordmark instead of restarting at the wordmark.
-   Travel is computed from the lockup and the tilt only, never from the band
-   width, so widening the band cannot speed the crossing up.
+   Travel is computed from the **whole band**: the beam coordinate
+   `q = x + (y - centerY) * tan(tilt)` is measured over every metal vertex, the
+   support radius `R` comes from the band's sigma, and the centre runs from
+   `qMin - R - padding` to `qMax + R + padding`. The first surface is therefore
+   a full band away from the entry point and the last one a full band away from
+   the exit point, and the canvas itself only covers the lockup.
 2. `material.ts` composites the live lockup once per layout or theme change:
    each SVG is serialized with its computed paints inlined and drawn at its own
    transform, then uploaded as an `rgba8unorm-srgb` texture so the hardware does
    the sRGB decode.
-3. `renderer.ts` samples that texture **through the inverse warp**. A source
+3. `geometry-mask.ts` rasterizes a mask from the **original vectors**: the
+   whale's fill, every wordmark stroke, the HARNESS plate, with the plate
+   lettering and every counter punched out. It is `rgba8unorm` coverage data,
+   never an sRGB image, built by a scanline pass with four subsamples per pixel,
+   so it costs a couple of milliseconds at DPR 3. A pixel is metal because of
+   the geometry it belongs to; its brightness only decides how much light it
+   returns. The band is multiplied by a linear albedo floor, so the darkest gold
+   and the plate still show a reflection instead of a dimmer copy of a beam that
+   skipped them.
+4. `renderer.ts` samples that texture **through the inverse warp**. A source
    pixel `d` off the axis lands `d * scale` off it, so features near the centre
    are genuinely spread apart; the displacement is bounded to
    `magnifyRadiusPx`, so a wide band cannot pull distant material in. The GPU and
    `beam.ts` agree to within one device pixel on the same material.
-4. The canvas is fully transparent outside the beam. At rest the SVG underneath
+5. The canvas is fully transparent outside the beam. At rest the SVG underneath
    is the only lockup on screen, so nothing is ever drawn twice and the sweep
    returns to exactly the original shape, size, position and colour.
-5. Frames run only inside the 3600 ms window. The rest of the period holds one
+6. Frames run only inside the 2700 ms window. The rest of the period holds one
    timer; a sweep missed while the page or the lockup was hidden is skipped, not
    replayed, and a second trigger cannot stack a second loop.
-6. The first sweep is armed when the material has been uploaded, not when a GPU
-   device merely exists, so the first cycle never runs against an empty canvas.
+7. The first sweep is armed when the material **and the mask** have been
+   uploaded, one delay out, so the first cycle never runs against an empty
+   canvas. Ordinary rebuilds keep that grid: only a first initialisation, a
+   resume from a hidden tab and a GPU reset establish a new origin.
 
 `prefers-reduced-motion: reduce` is re-read on every rebuild and on every change
 event: no displacement, no magnification, no periodic highlight, just the static

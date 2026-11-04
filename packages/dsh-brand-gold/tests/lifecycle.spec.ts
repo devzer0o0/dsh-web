@@ -8,6 +8,7 @@ import { BrandSweepController, beamCenterAt, crossingMs, sharedController, sweep
 import { buildLayout } from '../src/client/layout.ts'
 import { SWEEP_PARAMS } from '../src/client/sweep.ts'
 import { MARK_GEOMETRY, NAME_GEOMETRY } from '../src/client/paths.ts'
+import { shapeGeometryOf } from '../src/client/geometry-mask.ts'
 
 /** Give an element a layout box, which jsdom does not do. */
 function place(element: HTMLElement, width: number, height: number, left = 0, top = 0): void {
@@ -154,7 +155,11 @@ describe('brand sweep lifecycle', () => {
   })
 
   it('operator sees the beam arrive from the left and leave to the right, never both ways', () => {
-    // Given: the shared layout of the real lockup.
+    // Given: the shared layout of the real lockup, with the metal geometry.
+    const shapes = new Map([
+      ['mark', shapeGeometryOf(MARK_GEOMETRY)],
+      ['name', shapeGeometryOf(NAME_GEOMETRY)],
+    ])
     const layout = buildLayout(
       new Map([
         ['mark', { left: 16, top: 58, width: 24, height: 17.66 }],
@@ -165,16 +170,19 @@ describe('brand sweep lifecycle', () => {
         ['name', '26 0 156 24'],
       ]),
       2,
+      SWEEP_PARAMS,
+      shapes,
     )!
     // When: the centre is walked across the window.
-    const positions = [0, 0.1, 0.5, 0.9, 1].map((p) => beamCenterAt(layout.startX, layout.endX, p))
-    // Then: it never reverses, and the whole crossing is slow enough to see.
+    const positions = [0, 0.1, 0.5, 0.9, 1].map((p) => beamCenterAt(layout, p))
+    // Then: it never reverses, and the body crossing is the whole body stage.
     for (let index = 1; index < positions.length; index += 1) {
       expect(positions[index]!).toBeGreaterThan(positions[index - 1]!)
     }
-    expect(crossingMs(layout, SWEEP_PARAMS.sweepMs)).toBeGreaterThanOrEqual(2600)
-    // The beam starts outside the lockup on the left and ends outside it on the right.
-    expect(layout.startX).toBeLessThan(layout.pad * layout.dpr)
-    expect(layout.endX).toBeGreaterThan((layout.pad + layout.box.width) * layout.dpr)
+    expect(crossingMs()).toBe(SWEEP_PARAMS.surfaceMs)
+    // The band starts clear of the metal on the left and ends clear of it on the
+    // right, by a full support radius at each end.
+    expect(layout.centerStart).toBeLessThanOrEqual(layout.qMin - layout.supportRadius)
+    expect(layout.centerEnd).toBeGreaterThanOrEqual(layout.qMax + layout.supportRadius)
   })
 })

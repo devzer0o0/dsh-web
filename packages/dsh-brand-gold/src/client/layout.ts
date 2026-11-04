@@ -8,16 +8,27 @@
  * canvas and the beam therefore see a single lockup, and the beam crosses the
  * gap between the icon and the wordmark instead of restarting.
  *
- * Travel is decoupled from the band width. The beam has to clear the lockup far
- * enough for its envelope to reach zero — about ten percent of the lockup width
- * plus the tilt compensation — and no further. Scaling the entry and exit with
- * the band would spend the window outside the lockup and speed the crossing up
- * again, which is the trap the previous sigma did fall into.
+ * Units are explicit and converted once:
+ *
+ * - `box` is the element's rendered box in CSS pixels, never a viewBox size;
+ * - `cssScale` is CSS pixels per viewBox unit (the viewBox ratio, with
+ *   `preserveAspectRatio` meet semantics);
+ * - `dpr` is the only CSS-to-device conversion, applied after the ratio;
+ * - `offsetX/offsetY` place a part's viewBox origin in canvas device pixels,
+ *   shared padding included.
+ *
+ * Travel is computed from the **whole band**, not from a tenth of the width:
+ * the beam coordinate `q = x + (y - centerY) * tan(tilt)` is measured over every
+ * metal vertex, the support radius `R` is taken from the wide band's sigma, and
+ * the beam centre runs from `qMin - R - padding` to `qMax + R + padding`, so the
+ * first surface is a full band away from the entry point and the last one is a
+ * full band away from the exit point.
  *
  * @module dsh-brand-gold/layout
  */
 
-import { beamWidths, tiltTan } from './beam.ts'
+import { beamWidths, fwhmToSigma, tiltTan } from './beam.ts'
+import { metalExtent, type ShapeGeometry } from './geometry-mask.ts'
 import { SWEEP_PARAMS, type SweepParams } from './sweep.ts'
 
 /** Box in viewport CSS pixels, top-left origin. */
@@ -58,16 +69,52 @@ export interface BrandGeometry {
   readonly viewBox: string
 }
 
+/** Device-pixel rectangle a part may paint into. */
+export interface ClipRect {
+  /** Left edge in device pixels. */
+  readonly left: number
+  /** Top edge in device pixels. */
+  readonly top: number
+  /** Width in device pixels; never rounded, so the material is not rescaled. */
+  readonly width: number
+  /** Height in device pixels. */
+  readonly height: number
+}
+
 /** Mapping from a part's viewBox units to the shared canvas. */
 export interface PartTransform {
   /** Device pixels per viewBox unit. */
   readonly scale: number
-  /** Canvas device-pixel offset of the part's rendered box. */
+  /** CSS pixels per viewBox unit (the viewBox ratio, DPR excluded). */
+  readonly cssScale: number
+  /** Device pixels per CSS pixel of this layout. */
+  readonly dpr: number
+  /** Canvas device-pixel position of the viewBox origin. */
   readonly offsetX: number
-  /** Canvas device-pixel offset of the part's rendered box. */
+  /** Canvas device-pixel position of the viewBox origin. */
   readonly offsetY: number
+  /** Canvas device-pixel size of the mapped viewBox. */
+  readonly width: number
+  /** Canvas device-pixel size of the mapped viewBox. */
+  readonly height: number
+  /** The part's own box in device pixels; nothing outside it may be painted. */
+  readonly clip: ClipRect
   /** Rendered box in viewport CSS pixels. */
   readonly box: Box
+}
+
+/** Stage windows inside one sweep, in milliseconds from its start. */
+export interface SweepPhases {
+  /** Length of the entry stage. */
+  readonly entryMs: number
+  /** Length of the body stage. */
+  readonly surfaceMs: number
+  /** Length of the exit stage. */
+  readonly exitMs: number
+  /** End of the entry stage, where the first surface starts to be lit. */
+  readonly surfaceStartMs: number
+  /** Start of the exit stage, after the last surface was lit. */
+  readonly exitStartMs: number
 }
 
 /** Rendering parameters for one sweep, shared by every canvas. */
@@ -83,20 +130,30 @@ export interface LockupLayout {
   readonly sigma: number
   /** Champagne core sigma, in device pixels. */
   readonly coreSigma: number
+  /** Champagne collar sigma, in device pixels. */
+  readonly collarSigma: number
   /** Wide gold band visible FWHM, in CSS pixels. */
   readonly mainFwhm: number
   /** Champagne core visible FWHM, in CSS pixels. */
   readonly coreFwhm: number
   /** Radius of the local magnification, in device pixels. */
   readonly magnifyRadiusPx: number
+  /** Finite support radius of the band, in device pixels. */
+  readonly supportRadius: number
   /** Vertical centre the beam tilt is measured from, in device pixels. */
   readonly centerY: number
-  /** First beam centre, in device pixels (left of the lockup). */
-  readonly startX: number
-  /** Last beam centre, in device pixels (right of the lockup). */
-  readonly endX: number
+  /** Smallest band coordinate that covers metal, in device pixels. */
+  readonly qMin: number
+  /** Largest band coordinate that covers metal, in device pixels. */
+  readonly qMax: number
+  /** First beam centre: a whole support radius before the leftmost surface. */
+  readonly centerStart: number
+  /** Last beam centre: a whole support radius after the rightmost surface. */
+  readonly centerEnd: number
   /** Padding around the union box, in CSS pixels, so the warp cannot clip. */
   readonly pad: number
+  /** Stage windows of the sweep. */
+  readonly phases: SweepPhases
   /** Part transforms keyed by part id. */
   readonly parts: ReadonlyMap<string, PartTransform>
 }
@@ -131,9 +188,6 @@ export function boxOf(element: Element): Box | undefined {
  * meet semantics (the shell fixes the box to the viewBox aspect, but a rounded
  * width must not skew the geometry).
  *
- * `box` is already in CSS pixels and `dpr` is the only place CSS becomes device
- * pixels: the viewBox ratio is applied in CSS pixels first, then converted once.
- *
  * @param viewBox - `minX minY width height`.
  * @param box - rendered box in viewport CSS pixels.
  * @param origin - top-left of the lockup in viewport CSS pixels.
@@ -148,31 +202,70 @@ export function partTransform(
   dpr: number,
   pad: number,
 ): PartTransform {
-  const [, , width = 1, height = 1] = viewBox.split(/\s+/).map(Number)
-  const cssScale = Math.min(box.width / width, box.height / height)
-  const offsetX = (box.left - origin.left + pad) * dpr
-  const offsetY = (box.top - origin.top + pad) * dpr
-  return { scale: cssScale * dpr, offsetX, offsetY, box }
+  const [minX = 0, minY = 0, vbWidth = 1, vbHeight = 1] = viewBox.split(/\s+/).map(Number)
+  const cssScale = Math.min(box.width / Math.max(vbWidth, 1e-6), box.height / Math.max(vbHeight, 1e-6))
+  // The artwork is centred inside its own box when the box is not exactly the
+  // viewBox aspect; both offsets are derived from the same ratio, so the
+  // material, the mask and the plate quad agree to the pixel.
+  const contentLeft = box.left + (box.width - vbWidth * cssScale) / 2
+  const contentTop = box.top + (box.height - vbHeight * cssScale) / 2
+  const offsetX = (contentLeft - origin.left + pad) * dpr
+  const offsetY = (contentTop - origin.top + pad) * dpr
+  const width = vbWidth * cssScale * dpr
+  const height = vbHeight * cssScale * dpr
+  return {
+    scale: cssScale * dpr,
+    cssScale,
+    dpr,
+    offsetX,
+    offsetY,
+    width,
+    height,
+    clip: { left: offsetX, top: offsetY, width, height },
+    box,
+  }
 }
 
 /**
- * Entry and exit travel of the beam centre, in CSS pixels, relative to the
- * lockup box.
- *
- * A tenth of the lockup width gets the wide band past the edge, and half the
- * lockup height times `abs(tan(tilt))` covers the lean, so the core is fully
- * clear at both ends. The envelope then fades the remaining tail, instead of
- * walking the beam off screen.
- *
- * @param width - lockup width, in CSS pixels.
- * @param height - lockup height, in CSS pixels.
+ * The support radius of the band, in CSS pixels.
+ * @param mainFwhm - visible band width, in CSS pixels.
  * @param params - sweep dials.
- * @returns the horizontal overhang on each side, in CSS pixels.
+ * @returns the radius where the profile is exactly zero.
  */
-export function travelOverhang(width: number, height: number, params: SweepParams = SWEEP_PARAMS): number {
-  const margin = width * params.travelMarginRatio
-  const lean = 0.5 * height * Math.abs(tiltTan(params.tiltDeg))
-  return margin + lean + params.magnifyRadiusPx + params.liftPx
+export function supportRadiusCss(mainFwhm: number, params: SweepParams = SWEEP_PARAMS): number {
+  return fwhmToSigma(mainFwhm) * params.supportSigmas
+}
+
+/**
+ * Band-coordinate extent of the metal, in device pixels.
+ *
+ * @param layout - the lockup.
+ * @param shapes - geometry per part id, when the mask was built.
+ * @param tanTilt - tangent of the beam lean.
+ * @returns the extent, from the metal itself when it is known.
+ */
+export function bandExtent(
+  layout: Pick<LockupLayout, 'box' | 'pad' | 'dpr' | 'centerY' | 'parts'>,
+  shapes: ReadonlyMap<string, ShapeGeometry> | undefined,
+  tanTilt: number,
+): { min: number; max: number } {
+  const full = shapes === undefined
+    ? undefined
+    : metalExtent(layout as LockupLayout, shapes, tanTilt)
+  if (full !== undefined) return full
+  // Without geometry, the union box corners are the conservative bound. They
+  // include the lean at both vertical extremes, so the ends are still covered.
+  const left = layout.pad * layout.dpr
+  const right = (layout.pad + layout.box.width) * layout.dpr
+  const top = layout.pad * layout.dpr
+  const bottom = (layout.pad + layout.box.height) * layout.dpr
+  const q = [
+    left + (top - layout.centerY) * tanTilt,
+    left + (bottom - layout.centerY) * tanTilt,
+    right + (top - layout.centerY) * tanTilt,
+    right + (bottom - layout.centerY) * tanTilt,
+  ]
+  return { min: Math.min(...q), max: Math.max(...q) }
 }
 
 /**
@@ -181,6 +274,7 @@ export function travelOverhang(width: number, height: number, params: SweepParam
  * @param viewBoxes - viewBox per part id.
  * @param dpr - device pixels per CSS pixel.
  * @param params - sweep dials.
+ * @param shapes - geometry per part id, used for the exact band extent.
  * @returns the layout, or undefined when a part has collapsed.
  */
 export function buildLayout(
@@ -188,6 +282,7 @@ export function buildLayout(
   viewBoxes: ReadonlyMap<string, string>,
   dpr: number,
   params: SweepParams = SWEEP_PARAMS,
+  shapes?: ReadonlyMap<string, ShapeGeometry>,
 ): LockupLayout | undefined {
   if (boxes.size === 0) return undefined
   let union: Box | undefined
@@ -206,13 +301,26 @@ export function buildLayout(
     params.coreFwhmMaxPx,
   )
   const centerY = (pad + union.height / 2) * dpr
-  const overhang = travelOverhang(union.width, union.height, params)
+  const tanTilt = tiltTan(params.tiltDeg)
   const parts = new Map<string, PartTransform>()
   for (const [id, box] of boxes) {
     const viewBox = viewBoxes.get(id)
     if (viewBox === undefined) continue
     parts.set(id, partTransform(viewBox, box, union, dpr, pad))
   }
+  const supportRadius = supportRadiusCss(widths.mainFwhm, params) * dpr
+  const partial = {
+    box: union,
+    pad,
+    dpr,
+    centerY,
+    parts,
+  }
+  const extent = bandExtent(partial, shapes, tanTilt)
+  // The padding covers the largest displacement the warp can produce (a
+  // magnified source point plus the lift) and a pixel of antialiasing.
+  const warpPadding = (params.magnifyRadiusPx * (params.magnifyPeak - 1) + params.liftPx + 1) * dpr
+  const padding = Math.max(params.travelPaddingPx * dpr, warpPadding)
   return {
     box: union,
     dpr,
@@ -220,13 +328,24 @@ export function buildLayout(
     height,
     sigma: widths.mainSigma * dpr,
     coreSigma: widths.coreSigma * dpr,
+    collarSigma: widths.collarSigma * dpr,
     mainFwhm: widths.mainFwhm,
     coreFwhm: widths.coreFwhm,
     magnifyRadiusPx: params.magnifyRadiusPx * dpr,
+    supportRadius,
     centerY,
-    startX: (pad - overhang) * dpr,
-    endX: (pad + union.width + overhang) * dpr,
+    qMin: extent.min,
+    qMax: extent.max,
+    centerStart: extent.min - supportRadius - padding,
+    centerEnd: extent.max + supportRadius + padding,
     pad,
+    phases: {
+      entryMs: params.entryMs,
+      surfaceMs: params.surfaceMs,
+      exitMs: params.exitMs,
+      surfaceStartMs: params.entryMs,
+      exitStartMs: params.entryMs + params.surfaceMs,
+    },
     parts,
   }
 }

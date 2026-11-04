@@ -22,6 +22,7 @@ import {
 import { buildLayout } from '../src/client/layout.ts'
 import { SWEEP_PARAMS } from '../src/client/sweep.ts'
 import type { GpuCanvasConfiguration, GpuCanvasContext, GpuDevice } from '../src/client/webgpu.ts'
+import type { MaskImage } from '../src/client/geometry-mask.ts'
 
 /**
  * Encode a number as an IEEE half float.
@@ -106,7 +107,53 @@ function stubRenderer(keep: { alphaMode: 'opaque' | 'premultiplied'; tone: 'stan
   material.width = 8
   material.height = 8
   created.setMaterial(material)
+  created.setMask(maskStub())
   return { renderer: created, writes, configurations, destroyed: () => destroys }
+}
+
+/**
+ * A tiny stand-in mask.
+ *
+ * The renderer refuses to draw without one — an unlit material is better than a
+ * highlight on an arbitrary pixel — so every stub frame carries it.
+ * @returns a 2 x 2 mask.
+ */
+function maskStub(): MaskImage {
+  const data = new Uint8ClampedArray(16)
+  for (let index = 0; index < 4; index += 1) {
+    data[index * 4] = 255
+    data[index * 4 + 3] = 255
+  }
+  return {
+    width: 2,
+    height: 2,
+    data,
+    coverage: new Float32Array([1, 1, 1, 1]),
+    surface: new Uint8Array([1, 1, 1, 1]),
+  }
+}
+
+/**
+ * jsdom ships no 2D context, so `setMask` would bail out before the texture
+ * exists and every frame would be skipped. The stub only has to carry the
+ * pixels; nothing in the renderer reads them back.
+ */
+function stubCanvas2d(): void {
+  HTMLCanvasElement.prototype.getContext = function getContext(this: HTMLCanvasElement, kind: string) {
+    if (kind !== '2d') return null
+    return {
+      putImageData() {},
+      clearRect() {},
+      drawImage() {},
+      save() {},
+      restore() {},
+      beginPath() {},
+      rect() {},
+      clip() {},
+      imageSmoothingEnabled: true,
+      imageSmoothingQuality: 'high',
+    }
+  } as unknown as HTMLCanvasElement['getContext']
 }
 
 /** A frame with the shipped dials on the 188 px lockup. */
@@ -122,8 +169,27 @@ function frame(peakLinear: number): DrawFrame {
     ]),
     2,
   )!
-  return { centerX: layout.startX, sweep: 1, layout, params: SWEEP_PARAMS, peakLinear, plate: undefined }
+  return { centerX: layout.centerStart, sweep: 1, warp: 1, layout, params: SWEEP_PARAMS, peakLinear }
 }
+
+/**
+ * jsdom ships no `ImageData`; the renderer only needs a byte container with
+ * width, height and data, so the test environment gets the same shape.
+ */
+if (typeof (globalThis as { ImageData?: unknown }).ImageData !== 'function') {
+  ;(globalThis as { ImageData?: unknown }).ImageData = class {
+    readonly width: number
+    readonly height: number
+    readonly data: Uint8ClampedArray
+    constructor(data: Uint8ClampedArray, width: number, height: number) {
+      this.data = data
+      this.width = width
+      this.height = height
+    }
+  }
+}
+
+stubCanvas2d()
 
 describe('renderer wiring', () => {
   it('operator gets the requested alpha mode and tone mapping kept apart', () => {
@@ -187,12 +253,22 @@ describe('renderer wiring', () => {
     // and the extended flag — the values the test computed, not defaults.
     const uniforms = stub.writes.at(-1)!
     expect(uniforms[1]).toBeCloseTo(drawFrame.layout.sigma, 5)
+    // The uniform buffer is float32, so the comparison is at float32 precision.
+    expect(uniforms[3]).toBeCloseTo(drawFrame.layout.supportRadius, 2)
     expect(uniforms[9]).toBeCloseTo(drawFrame.layout.coreSigma, 5)
+    expect(uniforms[10]).toBeCloseTo(drawFrame.layout.collarSigma, 5)
     expect(uniforms[11]).toBeCloseTo(1600 / 203, 4)
-    expect(uniforms[25]).toBe(1)
+    // window.w: the extended ceiling flag lives in the fifth slot now that the
+    // plate quad is gone from the uniform block.
+    expect(uniforms[21]).toBe(1)
     expect(uniforms[12]).toBeCloseTo(SWEEP_PARAMS.magnifyPeak, 5)
     expect(uniforms[13]).toBeCloseTo(SWEEP_PARAMS.plateFactor, 5)
     expect(uniforms[14]).toBeCloseTo(SWEEP_PARAMS.bandGain, 5)
+    // The deformation amplitude travels with the frame, so a rest frame is the
+    // identity mapping on the GPU too.
+    expect(uniforms[17]).toBe(1)
+    // The mask is bound, and the shader is told so.
+    expect(uniforms[26]).toBe(1)
   })
 
   it('operator never gets an extended request on a standard surface', () => {
@@ -204,7 +280,7 @@ describe('renderer wiring', () => {
     // shoulder instead of writing values the compositor would clamp.
     const uniforms = stub.writes.at(-1)!
     expect(uniforms[11]).toBe(0)
-    expect(uniforms[25]).toBe(0)
+    expect(uniforms[21]).toBe(0)
   })
 
   it('operator gets the SDR mode when that is what was requested', () => {

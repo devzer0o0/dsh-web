@@ -142,6 +142,7 @@ export interface LightResult {
  * @param bandGain - band luminance relative to SDR white.
  * @param collarGain - collar luminance relative to SDR white.
  * @param peakLinear - requested peak luminance at the core centre.
+ * @param albedoFloor - linear floor the band is multiplied by.
  * @returns the target luminance and the core's share of it.
  */
 export function sweepLight(
@@ -149,6 +150,7 @@ export function sweepLight(
   bandGain: number,
   collarGain: number,
   peakLinear: number,
+  albedoFloor = 0,
 ): LightResult {
   // `gate` is the material gate only; the plate attenuation is a separate
   // linear factor so the plate really gets `plateFactor` of the added light
@@ -156,9 +158,16 @@ export function sweepLight(
   const gate = input.envelope * input.metal
   if (gate <= 0) return { targetLuma: input.baseLuma, coreLuma: 0, bandLuma: 0 }
   const response = input.response * gate
-  const bandLuma = input.baseLuma * bandGain * input.band * response
+  // `albedo` is a floor on how bright the band reads, never a gate: a pixel the
+  // mask rejected stays dark no matter how dark the material is. It is one
+  // factor, applied once, so the plate is attenuated once and not twice.
+  const albedo = Math.max(input.baseLuma, albedoFloor)
+  const bandLuma = albedo * bandGain * input.band * response
   const litLuma = input.baseLuma + bandLuma + collarGain * input.collar * response
-  const coreTerm = input.core * input.core * gate
+  // The core weight enters exactly once. A squared weight delivers a core
+  // narrower than the declared FWHM, which is what "the core is 19 px" would
+  // then no longer describe.
+  const coreTerm = input.core * gate
   const ceiling = peakLinear * response
   const targetLuma = litLuma + Math.max(ceiling - litLuma, 0) * coreTerm
   return { targetLuma, coreLuma: targetLuma - litLuma, bandLuma }

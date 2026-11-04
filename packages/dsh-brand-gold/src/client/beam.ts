@@ -5,12 +5,18 @@
  * measured on a horizontal cross-section of the lockup** (the row of pixels an
  * observer sees). With a tilt, the beam coordinate
  *
- *     u = (x - centerX) + (y - centerY) * tan(tilt)
+ *     q = x + (y - centerY) * tan(tilt),  u = q - center
  *
  * advances one CSS pixel per horizontal pixel on any fixed row, so the FWHM in
  * `u` and the FWHM across a horizontal cross-section are the same number. The
  * CPU geometry, the WGSL and the tests all use that one definition; nothing is
  * expressed as a raw sigma.
+ *
+ * A Gaussian never reaches zero, so the profile is multiplied by a **finite
+ * support window** that is exactly 1 out to `SUPPORT_INNER` of the support
+ * radius and exactly 0 at the radius. The main band, the core, the collar, the
+ * visibility gate and the deformation all use that same window, so "the beam
+ * has left" is a provable statement rather than a fade someone tuned.
  *
  * @module dsh-brand-gold/beam
  */
@@ -63,6 +69,16 @@ export interface BeamSpec {
   readonly magnifyPeak: number
   /** Radius, in CSS pixels, inside which magnification moves material. */
   readonly magnifyRadiusPx: number
+  /**
+   * Radius, in CSS pixels, where the support window closes. Omitted means "no
+   * window", which only the width arithmetic uses.
+   */
+  readonly supportRadius?: number
+  /**
+   * Amplitude of the deformation, 0..1. Zero restores the identity mapping, so
+   * a resting or not-yet-entered lockup is never displaced.
+   */
+  readonly warp?: number
 }
 
 /** Ratio that keeps the core from swallowing a small lockup's band. */
@@ -70,6 +86,15 @@ const CORE_TO_MAIN_MAX = 0.4
 
 /** The collar sits between the core and the band: narrower than the band. */
 const COLLAR_TO_MAIN = 0.42
+
+/**
+ * Where the support window starts closing, as a share of the radius.
+ *
+ * 0.6 of three sigma is 1.8 sigma, where the Gaussian is already below 4% of
+ * its peak, so the window removes the tail without touching the half-maximum
+ * width or narrowing the core.
+ */
+export const SUPPORT_INNER = 0.6
 
 /**
  * Convert a visible FWHM into the sigma of `exp(-(u/sigma)^2)`.
@@ -145,14 +170,32 @@ export function beamCoordinate(point: Point, beam: BeamSpec): number {
 }
 
 /**
+ * Finite support window: 1 well inside the radius, exactly 0 at it.
+ * @param offset - absolute distance from the axis, in CSS pixels.
+ * @param beam - current beam geometry.
+ * @returns the window value, 1 when no support radius is declared.
+ */
+export function supportWindow(offset: number, beam: BeamSpec): number {
+  const radius = beam.supportRadius
+  if (radius === undefined || !(radius > 0)) return 1
+  const distance = Math.abs(offset)
+  const inner = radius * SUPPORT_INNER
+  if (distance <= inner) return 1
+  if (distance >= radius) return 0
+  const t = (distance - inner) / (radius - inner)
+  return 1 - t * t * (3 - 2 * t)
+}
+
+/**
  * Wide gold band weight at one point.
  * @param point - canvas CSS pixel.
  * @param beam - current beam geometry.
- * @returns 1 on the axis, 0.5 at the band's half width, decaying to 0 outside.
+ * @returns 1 on the axis, 0.5 at the band's half width, exactly 0 outside the
+ * finite support radius.
  */
 export function beamWeight(point: Point, beam: BeamSpec): number {
   const u = beamCoordinate(point, beam)
-  return Math.exp(-(u * u) / (beam.sigma * beam.sigma))
+  return Math.exp(-(u * u) / (beam.sigma * beam.sigma)) * supportWindow(u, beam)
 }
 
 /**
@@ -163,7 +206,7 @@ export function beamWeight(point: Point, beam: BeamSpec): number {
  */
 export function coreWeight(point: Point, beam: BeamSpec): number {
   const u = beamCoordinate(point, beam)
-  return Math.exp(-(u * u) / (beam.coreSigma * beam.coreSigma))
+  return Math.exp(-(u * u) / (beam.coreSigma * beam.coreSigma)) * supportWindow(u, beam)
 }
 
 /**
@@ -174,7 +217,19 @@ export function coreWeight(point: Point, beam: BeamSpec): number {
  */
 export function collarWeight(point: Point, beam: BeamSpec): number {
   const u = beamCoordinate(point, beam)
-  return Math.exp(-(u * u) / (beam.collarSigma * beam.collarSigma))
+  return Math.exp(-(u * u) / (beam.collarSigma * beam.collarSigma)) * supportWindow(u, beam)
+}
+
+/**
+ * Amplitude of the deformation right now.
+ * @param beam - current beam geometry.
+ * @returns 0..1; 1 when the beam carries no enveloping.
+ */
+export function warpAmplitude(beam: BeamSpec): number {
+  const warp = beam.warp
+  if (warp === undefined) return 1
+  if (!Number.isFinite(warp)) return 0
+  return Math.max(0, Math.min(1, warp))
 }
 
 /**
@@ -184,7 +239,7 @@ export function collarWeight(point: Point, beam: BeamSpec): number {
  * @returns a scale factor between 1 and `magnifyPeak`.
  */
 export function magnifyAt(point: Point, beam: BeamSpec): number {
-  return 1 + (beam.magnifyPeak - 1) * beamWeight(point, beam)
+  return 1 + (beam.magnifyPeak - 1) * beamWeight(point, beam) * warpAmplitude(beam)
 }
 
 /**
@@ -193,13 +248,17 @@ export function magnifyAt(point: Point, beam: BeamSpec): number {
  * A source pixel `d` pixels off the axis lands `d * scale` pixels off it, so
  * features near the centre are genuinely spread apart by `scale`. The
  * displacement is bounded to the magnification radius: the light may be wide,
- * but it must never pull material in from tens of pixels away.
+ * but it must never pull material in from tens of pixels away. The whole
+ * displacement is scaled by the beam's warp amplitude, so a resting lockup maps
+ * onto itself exactly.
  *
  * @param point - source position in canvas CSS pixels.
  * @param beam - current beam geometry.
  * @returns the offset the point appears at.
  */
 export function warpOffset(point: Point, beam: BeamSpec): Point {
+  const amplitude = warpAmplitude(beam)
+  if (amplitude <= 0) return { x: 0, y: 0 }
   const weight = beamWeight(point, beam)
   const normalLength = Math.hypot(1, beam.tanTilt)
   const nx = 1 / normalLength
@@ -209,7 +268,7 @@ export function warpOffset(point: Point, beam: BeamSpec): Point {
   const local = Math.max(-beam.magnifyRadiusPx, Math.min(distance, beam.magnifyRadiusPx))
   // Forward warp: magnified material moves away from the axis, by (scale - 1).
   const radial = local * (scale - 1)
-  return { x: nx * radial, y: ny * radial - beam.liftPx * weight }
+  return { x: nx * radial * amplitude, y: (ny * radial - beam.liftPx * weight) * amplitude }
 }
 
 /**

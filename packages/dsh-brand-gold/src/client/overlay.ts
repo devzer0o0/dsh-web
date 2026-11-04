@@ -7,26 +7,34 @@
  * removes another instance's nodes: cleanup covers only the popover, GPU
  * resources, timers, animation frames and listeners it created itself.
  *
+ * Timing is an **absolute grid**: a cycle starts at
+ * `origin + cycleIndex * periodMs`, and the controller only ever looks up which
+ * cycle it is in. It never adds "this sweep" to "the wait after it", which is
+ * how a 3000 ms cadence turns into a 6000 ms one. A late timer resumes the cycle
+ * it belongs to; a timer that fires after the window closed skips the missed
+ * cycles instead of replaying them.
+ *
  * Frames are drawn only inside the sweep window. The resting part of every
  * period runs no animation frame at all; the next sweep is armed with a single
- * timer, and a sweep that would be missed while the page or the lockup is hidden
- * is skipped, never replayed.
+ * timer.
  *
- * The SVG underneath is never hidden. The overlay is an additive metal response:
- * the beam's light, its local magnification and its lift are drawn above the
- * original lockup and the canvas goes fully transparent outside the beam and
- * outside the metal, so the resting logo is exactly the SVG and nothing double
- * draws.
- *
- * The first sweep waits for the material to be uploaded, not merely for a GPU
- * device to exist: an animation that starts before there is anything to light
- * would spend its first cycle on an empty canvas.
+ * The first sweep waits until a material and a mask exist, then waits one
+ * period, so the very first cycle is on the same grid as every later one.
+ * Ordinary rebuilds — a resize, a theme change, a re-upload — keep the phase:
+ * only a first initialisation, an explicit resume from a hidden tab and a GPU
+ * reset establish a new origin.
  *
  * @module dsh-brand-gold/overlay
  */
 
 import { diag } from './diag.ts'
 import { acquireDevice, currentDevice, gpuStatus, probeCapabilities, resetDevice } from './gpu.ts'
+import {
+  buildMaskImage,
+  shapeGeometryOf,
+  type MaskImage,
+  type ShapeGeometry,
+} from './geometry-mask.ts'
 import { buildLayout, boxOf, type Box, type BrandGeometry, type LockupLayout } from './layout.ts'
 import { calibrationOf, type Calibration } from './light.ts'
 import { compositeMaterial, type MaterialPart } from './material.ts'
@@ -36,11 +44,19 @@ import {
   createRenderer,
   type CanvasMode,
   type DrawFrame,
-  type PlateRect,
   type ReadbackSummary,
   type SweepRenderer,
 } from './renderer.ts'
-import { SWEEP_PARAMS, nextSweepStartAt, type SweepParams } from './sweep.ts'
+import { SWEEP_PARAMS, validateSweepParams, type SweepParams } from './sweep.ts'
+import { SweepTimeline, type CycleInfo, type FrameInfo, type TimelineClock } from './timeline.ts'
+import {
+  envelopeAt,
+  sampleTrajectory,
+  trajectoryOf,
+  warpAt,
+  type SweepPose,
+  type TrajectoryPoint,
+} from './trajectory.ts'
 
 /**
  * Lifecycle phase. Every value is reported on its own, so "nothing drawn" can
@@ -55,8 +71,7 @@ import { SWEEP_PARAMS, nextSweepStartAt, type SweepParams } from './sweep.ts'
  * - `composite-failed`: the canvas or the popover could not be created;
  * - `drawing`: frames are being submitted;
  * - `verified`: frames submitted and the shader read back above 1.0. This is a
- *   shader verdict; `displayVerified` is measured separately and never inferred
- *   from it.
+ *   shader verdict, not a display verdict.
  */
 export type OverlayPhase =
   | 'idle'
@@ -105,8 +120,18 @@ export interface OverlayState {
   /** Peak coverage-weighted linear luminance, what a compositor would show. */
   readonly peakComposited: number
   /** Luminance in nits implied by the readback and the reference white. */
-  readonly measuredNits: number
-  /** Whether the logo is being composited with extended range. */
+  readonly estimatedNits: number
+  /**
+   * Whether over-unity light was proven **in the shader output**. A display
+   * measurement would be a different claim, and this field never stands in for
+   * one.
+   */
+  readonly shaderVerified: boolean
+  /**
+   * Whether the display itself was measured. Always false: the host exposes no
+   * photometer, and a value inferred from an assumed reference white is an
+   * estimate, not a measurement.
+   */
   readonly displayVerified: boolean
   /** Reference white and headroom provenance. */
   readonly calibration: string
@@ -122,59 +147,70 @@ const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 const SHADER_HDR_FLOOR = 1.02
 
 /**
- * Smooth 0..1 ramp.
- * @param edge0 - lower edge.
- * @param edge1 - upper edge.
- * @param value - input.
- * @returns the eased value, clamped to 0..1.
- */
-function smoothstep(edge0: number, edge1: number, value: number): number {
-  const t = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0 || 1)))
-  return t * t * (3 - 2 * t)
-}
-
-/**
- * Sweep envelope over the window: soft entry, near-constant travel, soft exit.
+ * Sweep envelope over the window: opens during the entry stage, holds at full
+ * through the body and the band's tail, and closes once the tail has left.
  * @param progress - 0..1 through the sweep window.
- * @param params - tunables; the fade shares come from here.
+ * @param params - tunables.
  * @returns 0..1 amplitude.
  */
 export function sweepEnvelope(progress: number, params: SweepParams = SWEEP_PARAMS): number {
-  const fadeIn = Math.max(params.fadeInRatio, 1e-4)
-  const fadeOut = Math.max(params.fadeOutRatio, 1e-4)
-  const inRamp = smoothstep(0, fadeIn, progress)
-  const outRamp = 1 - smoothstep(1 - fadeOut, 1, progress)
-  return Math.max(0, Math.min(1, inRamp * outRamp))
+  const clamped = Math.max(0, Math.min(1, progress))
+  return envelopeAt(clamped * params.sweepMs, params)
 }
 
 /**
- * Beam centre at one point of the sweep window.
- * @param startX - first centre, in device pixels.
- * @param endX - last centre, in device pixels.
+ * Deformation amplitude over the window.
  * @param progress - 0..1 through the sweep window.
+ * @param params - tunables.
+ * @returns 0..1 amplitude; zero is the identity mapping.
+ */
+export function sweepWarp(progress: number, params: SweepParams = SWEEP_PARAMS): number {
+  const clamped = Math.max(0, Math.min(1, progress))
+  return warpAt(clamped * params.sweepMs, params)
+}
+
+/**
+ * Beam centre at one point of the sweep window, on the stage trajectory.
+ * @param layout - the measured lockup.
+ * @param progress - 0..1 through the sweep window.
+ * @param params - tunables.
+ * @param points - precomputed control points, when the caller has them.
  * @returns the centre, in device pixels.
  */
-export function beamCenterAt(startX: number, endX: number, progress: number): number {
-  return startX + (endX - startX) * Math.min(1, Math.max(0, progress))
+export function beamCenterAt(
+  layout: LockupLayout,
+  progress: number,
+  params: SweepParams = SWEEP_PARAMS,
+  points: readonly TrajectoryPoint[] = trajectoryOf(layout, params),
+): number {
+  const clamped = Math.max(0, Math.min(1, progress))
+  return sampleTrajectory(points, clamped * params.sweepMs)
 }
 
 /**
- * Time the beam centre spends inside the lockup, in milliseconds.
- *
- * The centre travels at a constant rate between `startX` and `endX`, so the
- * share of the window it spends between the lockup's two edges is exactly the
- * share of the travel those edges represent.
- *
- * @param layout - the measured layout.
- * @param sweepMs - length of the visible window.
- * @returns milliseconds from the centre reaching the left edge to the right edge.
+ * Same curve, sampled at a wall-clock offset instead of a 0..1 progress.
+ * @param layout - the measured lockup.
+ * @param elapsed - milliseconds from the start of the sweep.
+ * @param params - tunables.
+ * @param points - precomputed control points, when the caller has them.
+ * @returns the centre, in device pixels.
  */
-export function crossingMs(layout: LockupLayout, sweepMs: number): number {
-  const left = layout.pad * layout.dpr
-  const right = (layout.pad + layout.box.width) * layout.dpr
-  const span = layout.endX - layout.startX
-  if (span <= 0) return 0
-  return ((right - left) / span) * sweepMs
+export function centerAtElapsed(
+  layout: LockupLayout,
+  elapsed: number,
+  params: SweepParams = SWEEP_PARAMS,
+  points: readonly TrajectoryPoint[] = trajectoryOf(layout, params),
+): number {
+  return sampleTrajectory(points, elapsed)
+}
+
+/**
+ * Time the beam centre spends travelling across the metal, in milliseconds.
+ * @param params - tunables.
+ * @returns the body stage length.
+ */
+export function crossingMs(params: SweepParams = SWEEP_PARAMS): number {
+  return params.surfaceMs
 }
 
 /** The shared sweep controller. */
@@ -184,16 +220,16 @@ export class BrandSweepController {
   private canvas: HTMLCanvasElement | undefined
   private renderer: SweepRenderer | undefined
   private layout: LockupLayout | undefined
+  private mask: MaskImage | undefined
+  private maskKey = ''
+  private shapes: Map<string, ShapeGeometry> | undefined
   private resizeObserver: ResizeObserver | undefined
   private intersectionObserver: IntersectionObserver | undefined
   private themeObserver: MutationObserver | undefined
   private displayHandler: (() => void) | undefined
   private motionQuery: MediaQueryList | undefined
   private motionHandler: (() => void) | undefined
-  private frame = 0
-  private timer: number | undefined
-  private origin = 0
-  private armed = false
+  private timeline: SweepTimeline | undefined
   private disposed = false
   private listening = false
   private generation = 0
@@ -202,12 +238,13 @@ export class BrandSweepController {
   private lastSweepAt = 0
   private peakLinear = 0
   private peakComposited = 0
-  private displayVerified = false
+  private shaderVerified = false
   private effectiveMode = 'unknown'
   private ready = false
   private readonly mode: CanvasMode
   private readonly params: SweepParams
   private readonly calibration: Calibration
+  private readonly clock: TimelineClock
   private readonly onVisibility = (): void => this.handleVisibility()
   private readonly onViewport = (): void => this.rebuild('viewport')
 
@@ -215,14 +252,25 @@ export class BrandSweepController {
    * @param params - tunables; the shipped defaults unless a test overrides them.
    * @param mode - compositing and tone-mapping mode of the canvas.
    * @param headroom - reported extended-range headroom, when the host exposes it.
+   * @param clock - clock and scheduling primitives; injectable so the cadence
+   * is testable without a browser frame loop.
    */
   constructor(
     params: SweepParams = SWEEP_PARAMS,
     mode: CanvasMode = EXTENDED_MODE,
     headroom: number | undefined = undefined,
+    clock: TimelineClock | undefined = undefined,
   ) {
+    validateSweepParams(params)
     this.params = params
     this.mode = mode
+    this.clock = clock ?? {
+      now: () => performance.now(),
+      setTimeout: (handler, delay) => window.setTimeout(handler, delay),
+      clearTimeout: (id) => window.clearTimeout(id),
+      requestAnimationFrame: (handler) => window.requestAnimationFrame(handler),
+      cancelAnimationFrame: (id) => window.cancelAnimationFrame(id),
+    }
     this.calibration = calibrationOf(
       params.peakNits,
       params.sdrWhiteNits,
@@ -247,12 +295,37 @@ export class BrandSweepController {
   }
 
   /**
+   * Geometry currently backing the mask, for the tests and the diagnostic.
+   * @returns the shape map (a copy of the entries, not the live map).
+   */
+  geometrySnapshot(): Map<string, ShapeGeometry> {
+    this.shapes ??= this.buildShapes()
+    return new Map(this.shapes)
+  }
+
+  /** First sweep start on the controller's clock; 0 until it is established. */
+  get originAt(): number {
+    return this.timeline?.originAt ?? 0
+  }
+
+  /** Whether a sweep window is on screen right now. */
+  get sweeping(): boolean {
+    return this.timeline?.isRunning ?? false
+  }
+
+  /**
    * Register one occupant and re-measure the lockup.
    * @param occupant - element, SVG, geometry and id.
    */
   register(occupant: Occupant): void {
     if (this.disposed) return
     this.occupants.set(occupant.id, occupant)
+    // A new shape changes the metal mask, so the cached geometry of the other
+    // occupants has to be rebuilt with it; keeping the first build would leave
+    // every later part outside the mask.
+    this.shapes = undefined
+    this.mask = undefined
+    this.maskKey = ''
     this.listen()
     this.observe(occupant.root)
     this.rebuild('register:' + occupant.id)
@@ -264,6 +337,9 @@ export class BrandSweepController {
    */
   unregister(id: string): void {
     this.occupants.delete(id)
+    this.shapes = undefined
+    this.mask = undefined
+    this.maskKey = ''
     if (this.occupants.size === 0) {
       this.dispose()
       return
@@ -272,7 +348,7 @@ export class BrandSweepController {
   }
 
   /**
-   * Re-measure and redraw without touching the device or the timeline.
+   * Re-measure and redraw without touching the device or the timeline phase.
    * @param reason - diagnostic label.
    */
   rebuild(reason: string): void {
@@ -280,7 +356,7 @@ export class BrandSweepController {
     if (this.motionAllowed() === false) {
       // Reduced motion was switched on at runtime: stop everything and leave
       // the static gold SVG as the lockup.
-      this.cancel()
+      this.timeline?.stop()
       this.hide()
       this.ready = false
       this.phase = 'idle'
@@ -308,8 +384,9 @@ export class BrandSweepController {
       this.hide()
       return
     }
+    const shapes = this.shapes ?? this.buildShapes()
     const dpr = Math.min(window.devicePixelRatio || 1, 3)
-    const layout = buildLayout(boxes, viewBoxes, dpr, this.params)
+    const layout = buildLayout(boxes, viewBoxes, dpr, this.params, shapes)
     if (layout === undefined) {
       this.phase = 'zero-size'
       this.publish()
@@ -324,13 +401,28 @@ export class BrandSweepController {
       dpr,
       band: Math.round(layout.mainFwhm * 10) / 10,
       core: Math.round(layout.coreFwhm * 10) / 10,
-      crossing: Math.round(crossingMs(layout, this.params.sweepMs)),
+      support: Math.round(layout.supportRadius / dpr * 10) / 10,
+      travel: Math.round((layout.centerEnd - layout.centerStart) / dpr * 10) / 10,
     })
     if (!this.prepare()) return
     this.place()
     this.show()
-    if (this.ready) this.schedule()
+    this.publish()
     void this.upload()
+  }
+
+  /**
+   * Build the mask geometry of every part from its original vectors.
+   * @returns the geometry per part id.
+   */
+  private buildShapes(): Map<string, ShapeGeometry> {
+    const shapes = new Map<string, ShapeGeometry>()
+    for (const occupant of this.occupants.values()) {
+      shapes.set(occupant.id, shapeGeometryOf(occupant.geometry))
+    }
+    this.shapes = shapes
+    this.mask = undefined
+    return shapes
   }
 
   /**
@@ -470,56 +562,39 @@ export class BrandSweepController {
     if (this.popover !== undefined) this.popover.style.visibility = 'hidden'
   }
 
-  /** The HARNESS plate of the wordmark, in canvas pixels. */
-  private plateOf(): PlateRect | undefined {
-    const layout = this.layout
-    if (layout === undefined) return undefined
-    const name = this.occupants.get('name')
-    const plate = name?.geometry.plates?.[0]
-    const transform = layout.parts.get('name')
-    if (plate === undefined || transform === undefined) return undefined
-    const [minX = 0, minY = 0] = name!.geometry.viewBox.split(/\s+/).map(Number)
-    return {
-      x: transform.offsetX + (plate.x - minX) * transform.scale,
-      y: transform.offsetY + (plate.y - minY) * transform.scale,
-      width: plate.width * transform.scale,
-      height: plate.height * transform.scale,
-      rx: plate.rx * transform.scale,
-    }
-  }
-
   /**
    * Build the one frame description used by both `draw` and `measure`.
    *
    * A single resolver is what keeps the two paths comparable: they share the
-   * effective parameters, the same layout, the same envelope and the same
-   * material, so a readback can never disagree with what is on screen because of
-   * a duplicated expression.
+   * effective parameters, the same layout, the same pose and the same material,
+   * so a readback can never disagree with what is on screen because of a
+   * duplicated expression.
    *
-   * @param centerX - beam centre in device pixels.
-   * @param sweep - envelope amplitude.
+   * @param pose - centre and amplitudes at one instant.
    * @returns the frame.
    */
-  private resolveFrame(centerX: number, sweep: number): DrawFrame | undefined {
+  private resolveFrame(pose: SweepPose): DrawFrame | undefined {
     const layout = this.layout
     if (layout === undefined) return undefined
     return {
-      centerX,
-      sweep,
+      centerX: pose.centerX,
+      sweep: pose.envelope,
+      warp: pose.warp,
       layout,
       params: this.params,
       peakLinear: this.calibration.requestedPeakLinear,
-      plate: this.plateOf(),
     }
   }
 
   /**
-   * Composite the live lockup and hand it to the renderer.
+   * Composite the live lockup, build the metal mask and hand both to the
+   * renderer.
    *
    * Async by nature; the generation guards against a resize, a theme change or
    * a later layout replacing this result after it resolves. The timeline only
-   * becomes ready here, once a material exists, so the first sweep is a full
-   * delay after the resources are genuinely usable.
+   * becomes ready here, once a material and a mask exist. A rebuild that lands
+   * mid-sweep cancels the running cycle and rejoins the next one on the grid
+   * instead of moving the grid.
    */
   private async upload(): Promise<void> {
     const mine = ++this.generation
@@ -530,137 +605,144 @@ export class BrandSweepController {
     const parts: MaterialPart[] = []
     for (const occupant of this.occupants.values()) parts.push({ id: occupant.id, svg: occupant.svg })
     const material = await compositeMaterial(layout, parts)
-    if (this.disposed || mine !== this.generation || material === undefined) {
-      if (material === undefined && !this.disposed && mine === this.generation) {
-        this.phase = 'material-failed'
-        this.publish()
-        diag.record('material-failed')
-      }
+    if (this.disposed || mine !== this.generation) return
+    if (material === undefined) {
+      this.phase = 'material-failed'
+      this.publish()
+      diag.record('material-failed')
       return
     }
+    const shapes = this.shapes ?? this.buildShapes()
+    // The mask is coverage per canvas pixel, so it is only reusable at the size
+    // it was built for; a resize (or a DPR change) rebuilds it.
+    const key = layout.width + 'x' + layout.height
+    const mask = this.maskKey === key ? this.mask : undefined
+    const built = mask ?? buildMaskImage(layout, shapes)
+    if (built === undefined) {
+      this.phase = 'material-failed'
+      this.publish()
+      diag.record('mask-failed')
+      return
+    }
+    this.mask = built
+    this.maskKey = key
     renderer.setMaterial(material)
+    renderer.setMask(built)
     this.frames = 0
-    this.drawRest()
+    this.drawPose(this.restPose())
     this.ready = true
-    this.phase = this.phase === 'verified' ? 'verified' : 'drawing'
+    if (this.phase !== 'verified') this.phase = 'drawing'
     this.publish()
-    // The first sweep is measured from the moment the material is usable.
-    this.origin = performance.now() + this.params.firstDelayMs
-    this.schedule()
-  }
-
-  /** Paint the resting state (no beam) once. */
-  private drawRest(): void {
-    const layout = this.layout
-    const renderer = this.renderer
-    if (layout === undefined || renderer === undefined) return
-    const frame = this.resolveFrame(layout.startX, 0)
-    if (frame === undefined) return
-    renderer.draw(frame)
-    this.frames += 1
+    // Ordinary rebuilds keep the grid; only the first upload starts it.
+    this.syncTimeline()
   }
 
   /**
-   * Draw one frame.
-   * @param centerX - beam centre in device pixels.
-   * @param sweep - envelope amplitude.
+   * Pose of the resting lockup: no light, no deformation.
+   * @returns the pose.
    */
-  private draw(centerX: number, sweep: number): void {
+  private restPose(): SweepPose {
+    const layout = this.layout
+    return { centerX: layout?.centerStart ?? 0, envelope: 0, warp: 0 }
+  }
+
+  /** Paint one pose. */
+  private drawPose(pose: SweepPose): void {
     const renderer = this.renderer
-    const frame = this.resolveFrame(centerX, sweep)
+    const frame = this.resolveFrame(pose)
     if (renderer === undefined || frame === undefined) return
     renderer.draw(frame)
     this.frames += 1
   }
 
-  /** Arm the next sweep with exactly one timer. */
-  private schedule(): void {
+  /**
+   * Ensure the timeline exists and decide what it should do about the grid.
+   *
+   * Only the first initialisation establishes an origin. A rebuild for a resize,
+   * a theme change or a material re-upload keeps the phase: if a window is open
+   * it is cancelled cleanly and the next cycle is the next point on the same
+   * grid, never "one more full delay from now".
+   */
+  private syncTimeline(): void {
     if (this.disposed) return
-    if (this.timer !== undefined) {
-      window.clearTimeout(this.timer)
-      this.timer = undefined
+    if (this.timeline === undefined) {
+      this.timeline = new SweepTimeline(
+        {
+          canRun: () => this.canRun(),
+          frame: (info) => this.onFrame(info),
+          rest: () => this.onRest(),
+          cycleStart: (info) => this.onCycleStart(info),
+          skipped: () => diag.record('sweep-skipped'),
+        },
+        () => this.layout,
+        this.params,
+        this.clock,
+      )
+      this.timeline.start()
+      diag.record('origin', { source: 'initial', firstDelay: this.params.firstDelayMs })
+      return
     }
-    this.armed = false
-    if (!this.ready) return
-    if (document.hidden || !this.inViewport() || this.motionAllowed() === false) return
-    const now = performance.now()
-    if (this.origin === 0) this.origin = now + this.params.firstDelayMs
-    const start = nextSweepStartAt(now, this.origin, this.params)
-    this.armed = true
-    diag.record('armed', { delay: Math.round(start - now) })
-    this.timer = window.setTimeout(() => {
-      this.timer = undefined
-      this.startSweep()
-    }, Math.max(0, start - now))
+    if (this.timeline.cancelCycle()) {
+      // A rebuild landed inside a live window: stop the stale frames, put the
+      // resting lockup back, and let the grid decide the next start.
+      this.drawPose(this.restPose())
+      diag.record('cycle-cancelled', { reason: 'rebuild' })
+    }
+    this.timeline.arm()
   }
 
-  /** Run exactly one sweep inside the shared timeline. */
-  private startSweep(): void {
-    if (this.disposed || !this.armed || this.renderer === undefined) return
-    this.armed = false
-    if (document.hidden || !this.inViewport() || this.motionAllowed() === false) {
-      this.schedule()
-      return
-    }
-    const now = performance.now()
-    const period = Math.floor((now - this.origin) / this.params.periodMs)
-    const start = this.origin + period * this.params.periodMs
-    if (now - start > this.params.sweepMs) {
-      diag.record('sweep-skipped', { late: Math.round(now - start) })
-      this.schedule()
-      return
-    }
-    this.lastSweepAt = Date.now()
-    diag.record('sweep-start', { late: Math.round(now - start) })
-    // The beam position is sampled at most twice a second, which is enough to
-    // read the crossing off a real display without flooding the ring buffer.
-    let nextTrace = 0
-    const tick = (): void => {
-      this.frame = 0
-      if (this.disposed) return
-      const layout = this.layout
-      if (layout === undefined || this.renderer === undefined) return
-      const elapsed = performance.now() - start
-      const progress = Math.min(1, Math.max(0, elapsed / this.params.sweepMs))
-      const envelope = sweepEnvelope(progress, this.params)
-      this.draw(beamCenterAt(layout.startX, layout.endX, progress), envelope)
-      if (elapsed >= nextTrace) {
-        nextTrace = elapsed + 100
-        diag.record('beam', {
-          t: Math.round(elapsed),
-          css: Math.round((beamCenterAt(layout.startX, layout.endX, progress) / layout.dpr) * 10) / 10,
-          envelope: Math.round(envelope * 100) / 100,
-        })
-      }
-      if (this.frames % 3 === 0) this.publish()
-      if (progress < 1) {
-        this.frame = window.requestAnimationFrame(tick)
-        return
-      }
-      // The beam has left the lockup: paint the resting state once and stop.
-      // The measurement runs on its own and upgrades the phase when it lands.
-      this.drawRest()
-      // The readback allocates a texture and a mapped buffer; it is diagnostic
-      // work and never runs on every cycle unless diagnostics were requested.
-      if (diag.enabled) void this.measureCycle()
-      this.publish()
-      this.schedule()
-    }
-    this.frame = window.requestAnimationFrame(tick)
+  /**
+   * Whether a sweep may run right now.
+   * @returns true when the material exists and the lockup is visible.
+   */
+  private canRun(): boolean {
+    if (this.disposed || !this.ready || this.renderer === undefined) return false
+    if (document.hidden || !this.inViewport()) return false
+    return this.motionAllowed() !== false
   }
+
+  /**
+   * Draw one frame of the running cycle.
+   * @param info - cycle, time and pose.
+   */
+  private onFrame(info: FrameInfo): void {
+    if (!this.canRun()) return
+    this.drawPose(info.pose)
+    if (this.frames % 3 === 0) this.publish()
+  }
+
+  /** Close the window: paint the resting state once and record the reading. */
+  private onRest(): void {
+    this.drawPose(this.restPose())
+    // The readback allocates a texture and a mapped buffer; it is diagnostic
+    // work and never runs on every cycle unless diagnostics were requested.
+    if (diag.enabled) void this.measureCycle()
+    this.publish()
+  }
+
+  /**
+   * Record the start of one cycle.
+   * @param info - the cycle's grid position and lateness.
+   */
+  private onCycleStart(info: CycleInfo): void {
+    this.lastSweepAt = Date.now()
+    diag.record('sweep-start', { late: Math.round(info.late), cycle: info.index })
+  }
+
 
   /**
    * Measure one mid-sweep frame offscreen and record the peak linear value.
    *
    * This is the shader-level check: it proves the extended encode produced
    * values above 1.0 in the shader's own output. It is not a display
-   * measurement, and `displayVerified` is never derived from it.
+   * measurement, and no field on this controller claims otherwise.
    */
   private async measureCycle(): Promise<void> {
     const renderer = this.renderer
     const layout = this.layout
     if (renderer === undefined || layout === undefined) return
-    const frame = this.resolveFrame(beamCenterAt(layout.startX, layout.endX, 0.5), 1)
+    const mid = sampleTrajectory(trajectoryOf(layout, this.params), (this.params.entryMs + this.params.surfaceMs) / 2)
+    const frame = this.resolveFrame({ centerX: mid, envelope: 1, warp: 1 })
     if (frame === undefined) return
     const summary: ReadbackSummary = await renderer.measure(frame)
     if (this.disposed) return
@@ -668,7 +750,7 @@ export class BrandSweepController {
     this.peakComposited = summary.peakCompositedLuma
     // Only an extended canvas can actually present over-unity light; on a
     // standard surface the readback above 1.0 would be a shader-only artifact.
-    this.displayVerified = this.effectiveMode.endsWith('/extended') && this.peakComposited > SHADER_HDR_FLOOR
+    this.shaderVerified = this.effectiveMode.endsWith('/extended') && this.peakLinear > SHADER_HDR_FLOOR
     if (summary.peakLinearLuma > SHADER_HDR_FLOOR && this.phase === 'drawing') this.phase = 'verified'
     diag.record('measure', {
       peak: Math.round(summary.peakLinearLuma * 1000) / 1000,
@@ -709,27 +791,22 @@ export class BrandSweepController {
       this.cancel()
       return
     }
-    this.origin = performance.now() + this.params.firstDelayMs
+    // A tab that was hidden for a while must not replay the cycles it missed.
+    // It gets a fresh grid, one full delay out, exactly like a first start.
+    this.timeline?.resume()
     this.rebuild('visible')
   }
 
   /** Stop the animation-frame loop and the pending timer. */
   private cancel(): void {
-    if (this.frame !== 0) {
-      window.cancelAnimationFrame(this.frame)
-      this.frame = 0
-    }
-    if (this.timer !== undefined) {
-      window.clearTimeout(this.timer)
-      this.timer = undefined
-    }
-    this.armed = false
+    this.timeline?.stop()
   }
 
   /** Push the diagnostic snapshot. */
   private publish(): void {
     if (!diag.enabled) return
     const layout = this.layout
+    const white = this.calibration.sdrWhiteNits ?? this.params.assumedSdrWhiteNits
     const state: OverlayState = {
       phase: this.phase,
       mode: this.mode.alpha + '/' + this.mode.tone,
@@ -741,8 +818,11 @@ export class BrandSweepController {
       requestedPeakLinear: this.calibration.requestedPeakLinear,
       peakLinear: this.peakLinear,
       peakComposited: this.peakComposited,
-      measuredNits: this.peakComposited * (this.calibration.sdrWhiteNits ?? this.params.assumedSdrWhiteNits),
-      displayVerified: this.displayVerified,
+      // An estimate from an assumed reference white, named as one.
+      estimatedNits: this.peakComposited * white,
+      shaderVerified: this.shaderVerified,
+      // No photometer was read, so the display is not verified.
+      displayVerified: false,
       calibration: this.calibration.sdrWhiteSource + '/headroom:' + this.calibration.headroomSource,
     }
     diag.publish(state)
@@ -853,13 +933,21 @@ export class BrandSweepController {
     this.popover = undefined
     this.canvas = undefined
     this.layout = undefined
+    this.mask = undefined
+    this.maskKey = ''
+    this.shapes = undefined
     this.ready = false
+    this.timeline?.dispose()
+    this.timeline = undefined
     if (shared === this) shared = undefined
     diag.record('dispose')
   }
 
   /** Drop the device and rebuild on a fresh one (diagnostic and device loss). */
   resetGpu(): void {
+    this.cancel()
+    this.timeline?.dispose()
+    this.timeline = undefined
     this.renderer?.dispose()
     this.renderer = undefined
     this.ready = false

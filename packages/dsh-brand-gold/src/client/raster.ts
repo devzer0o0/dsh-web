@@ -8,6 +8,10 @@
  * linear light without a hand-rolled conversion, and the warped sample matches
  * the untouched SVG exactly: same ramp, same bevel, same counters.
  *
+ * The SVG is laid out at its live CSS size first and then resized to the device
+ * bitmap, so `viewBox`, `preserveAspectRatio` and the element's own box are all
+ * resolved by the browser's own mapping — exactly once.
+ *
  * The SVG is never hidden or replaced while the sweep runs, so no path can
  * rasterize an empty element.
  *
@@ -42,10 +46,16 @@ function inlinePaint(source: Element, clone: Element): void {
 }
 
 /**
- * Serialize a live SVG into a standalone data URI at device resolution.
+ * Serialize a live SVG into a standalone data URI at the element's own CSS size.
+ *
+ * `width` and `height` are CSS pixels of the rendered box, so the SVG keeps its
+ * own aspect ratio and the browser applies `preserveAspectRatio` for us. Any
+ * resampling happens once, on the decoded bitmap, where the transform says how
+ * many device pixels the viewBox occupies.
+ *
  * @param svg - rendered SVG.
- * @param width - target width in device pixels.
- * @param height - target height in device pixels.
+ * @param width - CSS pixels of the element's box.
+ * @param height - CSS pixels of the element's box.
  * @returns the data URI.
  */
 export function serializeSvg(svg: SVGSVGElement, width: number, height: number): string {
@@ -53,8 +63,8 @@ export function serializeSvg(svg: SVGSVGElement, width: number, height: number):
   inlinePaint(svg, clone)
   clone.removeAttribute('class')
   clone.removeAttribute('style')
-  clone.setAttribute('width', String(Math.max(1, Math.round(width))))
-  clone.setAttribute('height', String(Math.max(1, Math.round(height))))
+  clone.setAttribute('width', String(Math.max(1, width)))
+  clone.setAttribute('height', String(Math.max(1, height)))
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(clone))
 }
@@ -62,8 +72,8 @@ export function serializeSvg(svg: SVGSVGElement, width: number, height: number):
 /**
  * Decode the serialized lockup into a bitmap at device resolution.
  * @param uri - serialized SVG.
- * @param width - device pixels.
- * @param height - device pixels.
+ * @param width - device pixels of the mapped viewBox.
+ * @param height - device pixels of the mapped viewBox.
  * @returns the decoded bitmap.
  */
 export async function rasterize(uri: string, width: number, height: number): Promise<ImageBitmap> {

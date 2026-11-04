@@ -5,26 +5,30 @@
  * `rgba8unorm-srgb` texture, so the hardware does the sRGB decode and the
  * shader receives linear light without a second, hand-rolled conversion.
  *
- * Deformation: the fragment shader samples that texture **through the inverse
- * warp**, so material, outline and edge coverage move by the same function.
- * There is no second silhouette and no fixed outline mask, so a magnified stroke
- * cannot be cut and a double edge cannot appear.
+ * Coverage: a second texture carries the **geometric material mask** — which
+ * pixels are metal at all, and which belong to the HARNESS plate. It is
+ * `rgba8unorm`, never an sRGB format: it is coverage data, not an image, so no
+ * transfer curve may touch it. The shader reads metal coverage and the plate
+ * flag from the destination pixel, which is why the dark end of the gold ramp is
+ * lit while the dark HARNESS lettering never is.
  *
- * Coverage: the canvas is transparent except where the beam lands, so the
- * resting lockup is the SVG underneath and nothing is ever drawn twice.
+ * Deformation: the fragment shader samples the material **through the inverse
+ * warp**, so a magnified stroke is the same strokes, displaced by a bounded
+ * amount. The light field itself is evaluated at the destination pixel, so the
+ * beam is where the beam is, whatever the material underneath is doing.
  *
  * Output: tone mapping and alpha compositing are two independent dials.
  * `alphaMode` decides how the canvas composites with the page; `toneMapping`
- * decides whether values above 1.0 survive. The extended path is a floating
- * point surface with `toneMapping: { mode: 'extended' }`; the SDR path is the
- * same shader with the extended ceiling removed.
+ * decides whether values above 1.0 survive.
  *
  * @module dsh-brand-gold/renderer
  */
 
 import type { LockupLayout } from './layout.ts'
+import type { MaskImage } from './geometry-mask.ts'
 import { encodeSrgb, linearToSrgb, srgbToLinearExtended } from './color.ts'
 import { luminance } from './light.ts'
+import { SUPPORT_INNER } from './beam.ts'
 import {
   BUFFER_USAGE,
   MAP_MODE_READ,
@@ -59,10 +63,13 @@ export const SDR_MODE: CanvasMode = Object.freeze({ alpha: 'premultiplied', tone
 /** Extended-range mode: still transparent, over-unity values preserved. */
 export const EXTENDED_MODE: CanvasMode = Object.freeze({ alpha: 'premultiplied', tone: 'extended' })
 
-/** Every spatial term mirrors `beam.ts`. */
+/**
+ * Every spatial term mirrors `beam.ts`: the same `u`, the same finite support
+ * window, the same single-power core weight. Nothing here re-derives a width.
+ */
 const WGSL = `
 struct Params {
-  // x: beam centre, y: band sigma, z: tan(tilt), w: (unused)
+  // x: beam centre, y: band sigma, z: tan(tilt), w: support radius (device px)
   beam: vec4f,
   // x: canvas width, y: canvas height, z: vertical centre, w: lift in device px
   frame: vec4f,
@@ -70,21 +77,24 @@ struct Params {
   light: vec4f,
   // x: magnification, y: plate factor, z: band gain, w: collar gain
   warp: vec4f,
-  // x: local magnification radius in device px
+  // x: local magnification radius, y: warp amplitude, z: band albedo floor
   warpEdge: vec4f,
-  // x: plate centre x, y: plate centre y, z: plate half w, w: plate half h
-  plate: vec4f,
-  // x: plate radius, y: 1 while the extended ceiling is available
-  plateEdge: vec4f,
+  // x: support inner share, y: 1 while the extended ceiling is available
+  window: vec4f,
+  // x: mask width, y: mask height, z: 1 when a mask is bound
+  maskInfo: vec4f,
 };
 
 @group(0) @binding(0) var material: texture_2d<f32>;
 @group(0) @binding(1) var materialSampler: sampler;
-@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(2) var metalMask: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
 
 const LUMA = vec3f(0.2126, 0.7152, 0.0722);
 const CORE_COLOR = vec3f(1.0, 0.972, 0.902);
 const COLLAR_COLOR = vec3f(1.0, 0.878, 0.678);
+// Mid-ramp gold, used only when a sampled texel carries no colour at all.
+const GOLD_FALLBACK = vec3f(0.72, 0.46, 0.16);
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -105,25 +115,33 @@ fn beamU(px: vec2f) -> f32 {
   return (px.x - params.beam.x) + (px.y - params.frame.z) * params.beam.z;
 }
 
+// Finite support: 1 well inside the radius, exactly 0 at it. Mirrors
+// supportWindow() in beam.ts, so the CPU and the GPU agree on where the band
+// stops existing.
+fn supportAt(u: f32) -> f32 {
+  let radius = params.beam.w;
+  if (radius <= 0.0) { return 1.0; }
+  let inner = radius * params.window.x;
+  let d = abs(u);
+  if (d <= inner) { return 1.0; }
+  if (d >= radius) { return 0.0; }
+  let t = (d - inner) / max(radius - inner, 0.0001);
+  return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
 fn bandAt(px: vec2f) -> f32 {
-  let u = beamU(px) / max(params.beam.y, 0.0001);
-  return exp(-(u * u));
+  let u = beamU(px);
+  return exp(-(u * u) / max(params.beam.y * params.beam.y, 0.0001)) * supportAt(u);
 }
 
 fn coreAt(px: vec2f) -> f32 {
-  let u = beamU(px) / max(params.light.y, 0.0001);
-  return exp(-(u * u));
+  let u = beamU(px);
+  return exp(-(u * u) / max(params.light.y * params.light.y, 0.0001)) * supportAt(u);
 }
 
 fn collarAt(px: vec2f) -> f32 {
-  let u = beamU(px) / max(params.light.z, 0.0001);
-  return exp(-(u * u));
-}
-
-// Signed distance to the HARNESS plate, in canvas pixels.
-fn plateDistance(px: vec2f) -> f32 {
-  let d = abs(px - params.plate.xy) - params.plate.zw + vec2f(params.plateEdge.x, params.plateEdge.x);
-  return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0) - params.plateEdge.x;
+  let u = beamU(px);
+  return exp(-(u * u) / max(params.light.z * params.light.z, 0.0001)) * supportAt(u);
 }
 
 fn toned(color: vec3f, wanted: f32) -> vec3f {
@@ -136,14 +154,48 @@ fn toned(color: vec3f, wanted: f32) -> vec3f {
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let px = pos.xy;
 
+  // Material identity comes from the geometric mask at this pixel, so a shadowed
+  // gold stroke is metal at any luminance and the HARNESS ink never is.
+  let dims = vec2f(textureDimensions(material));
+  let own = clamp(px / dims, vec2f(0.0), vec2f(1.0));
+
+  let maskTexel = textureSampleLevel(metalMask, materialSampler, own, 0.0);
+  let maskOn = params.maskInfo.z;
+  let metal = select(1.0, clamp(maskTexel.r, 0.0, 1.0), maskOn > 0.5);
+  let plateFlag = select(0.0, clamp(maskTexel.g, 0.0, 1.0), maskOn > 0.5);
+
+  // The resting material texel of this very pixel. It decides two things: the
+  // pixel's own luminance (the sweep may only add light) and whether the
+  // overlay may paint at all, since the mask and the raster can disagree by a
+  // subpixel along a contour.
+  let ownTexelBase = textureSampleLevel(material, materialSampler, own, 0.0);
+  let ownCoverageAlpha = clamp(ownTexelBase.a, 0.0, 1.0);
+
+  let envelope = clamp(params.light.x, 0.0, 1.0);
+  let band = bandAt(px);
+  let vis = clamp(band * envelope * metal, 0.0, 1.0);
+  // The replacement only becomes opaque past a third of the band weight, so the
+  // delivered profile keeps the band's half-maximum width instead of being
+  // narrowed by a visibility ramp.
+  let alpha = metal * ownCoverageAlpha * smoothstep(0.02, 0.30, vis);
+  if (maskOn < 0.5) {
+    // No mask bound: never light an arbitrary pixel of the material.
+    return vec4f(0.0);
+  }
+  if (alpha <= 0.004) {
+    return vec4f(0.0);
+  }
+
   // Invert the warp: this destination pixel shows the material that lands on
-  // it. The displacement is sub-pixel, so two fixed-point steps converge.
+  // it. The displacement is sub-pixel, so two fixed-point steps converge. The
+  // amplitude scales the whole displacement, so a zero envelope is the identity.
   let nlen = sqrt(1.0 + params.beam.z * params.beam.z);
   let nx = 1.0 / nlen;
   let ny = params.beam.z / nlen;
+  let amp = clamp(params.warpEdge.y, 0.0, 1.0);
   var src = px;
   for (var step = 0; step < 2; step = step + 1) {
-    let weight = bandAt(src);
+    let weight = bandAt(src) * amp;
     let along = (src.x - params.beam.x) * nx + (src.y - params.frame.z) * ny;
     let scale = 1.0 + (params.warp.x - 1.0) * weight;
     // Bounded neighbourhood, mirroring magnifyRadiusPx in beam.ts: the light
@@ -153,65 +205,84 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     src = px - vec2f(nx * radial, ny * radial - params.frame.w * weight);
   }
 
-  let dims = vec2f(textureDimensions(material));
-  let texel = textureSampleLevel(material, materialSampler, clamp(src / dims, vec2f(0.0), vec2f(1.0)), 0.0);
-  let coverage = clamp(texel.a, 0.0, 1.0);
-
-  let envelope = clamp(params.light.x, 0.0, 1.0);
-  let band = bandAt(src);
-  let lit = clamp(band * envelope, 0.0, 1.0);
-  let show = smoothstep(0.02, 0.5, lit);
-  if (coverage <= 0.004 || show <= 0.004) {
-    return vec4f(0.0);
+  var uv = clamp(src / dims, vec2f(0.0), vec2f(1.0));
+  var texel = textureSampleLevel(material, materialSampler, uv, 0.0);
+  // Bilinear filtering blends the artwork with the transparent background, and
+  // an un-premultiplied surface interpolates its colour toward black. Dividing
+  // the interpolated colour back out by its own coverage recovers the material
+  // instead of painting a black fringe along every contour; where the sample is
+  // almost empty the pixel keeps its own material.
+  var base = texel.rgb;
+  let sampleCoverage = clamp(texel.a, 0.0, 1.0);
+  // The resting luminance of the pixel itself. The sweep adds light to the
+  // metal, so a warped sample of a darker part of the ramp may never pull the
+  // output below what is already on screen under it: that would read as a dark
+  // blotch travelling with the beam.
+  let ownLuma = dot(ownTexelBase.rgb, LUMA);
+  if (sampleCoverage < 0.55) {
+    // Bilinear filtering blends the artwork with the transparent background,
+    // and an un-premultiplied surface interpolates its colour toward black.
+    // Dividing the interpolated colour back out by its own coverage recovers
+    // the material instead of painting a black fringe along every contour.
+    let recovered = texel.rgb / max(sampleCoverage, 0.22);
+    let ownCoverage = clamp(ownTexelBase.a, 0.0, 1.0);
+    base = mix(ownTexelBase.rgb, recovered, smoothstep(0.12, 0.55, sampleCoverage) * smoothstep(0.0, 0.3, ownCoverage));
   }
 
-  let plate = 1.0 - smoothstep(-1.0, 1.0, plateDistance(src));
-  let response = mix(1.0, params.warp.y, plate);
-
-  // Highlights belong to metal, never to the HARNESS lettering.
-  let base = texel.rgb;
-  let baseLuma = dot(base, LUMA);
-  let metal = smoothstep(0.24, 0.46, baseLuma);
-
+  let response = mix(1.0, params.warp.y, plateFlag);
   let gate = envelope * metal;
-  let collar = collarAt(src);
-  let core = coreAt(src);
-
-  // Band first: gold, layered over the resting material. The plate factor is a
-  // linear attenuation of the added light, applied once.
   let response2 = response * gate;
-  let bandLuma = baseLuma * params.warp.z * band * response2;
+
+  let baseLuma = dot(base, LUMA);
+  // The albedo floor keeps the wide band readable on the darkest gold without
+  // lighting anything the mask rejected; it is one factor, applied once.
+  let albedo = max(baseLuma, params.warpEdge.z);
+
+  let collar = collarAt(px);
+  let core = coreAt(px);
+
+  // The wide band always contributes at least the floor: a stroke the mask
+  // accepted must actually light up, however dark the resting gold under it
+  // happens to be. The resting luminance is kept as the lower bound, so the
+  // beam only ever adds light.
+  let bandLuma = max(albedo, params.warpEdge.z) * params.warp.z * band * response2;
   let litLuma = baseLuma + bandLuma + params.warp.w * collar * response2;
 
   // The core spends only the luminance budget left under the ceiling, so the
-  // composite cannot overshoot the requested peak.
+  // composite cannot overshoot the requested peak. The weight is used once: a
+  // squared weight would deliver a core narrower than the declared FWHM.
   let ceiling = params.light.w * response2;
-  let coreTerm = core * core * gate;
+  let coreTerm = core * gate;
   let coreLuma = max(ceiling - litLuma, 0.0) * coreTerm;
   let wanted = litLuma + coreLuma;
 
-  // Split the target between the metal's own hue and the pale core tint.
-  let hue = mix(base, CORE_COLOR, clamp(coreLuma / max(wanted, 0.0001), 0.0, 1.0));
-  var rgb = toned(hue, wanted);
+  // Split the target between the metal's own hue and the pale core tint. A
+  // sample with no colour left (a transparent texel the warp pulled in) falls
+  // back to the gold ramp instead of normalising a black tint into black, which
+  // would punch a dark hole through the illuminated metal.
+  let ownHue = select(GOLD_FALLBACK, base, dot(base, LUMA) > 0.0005);
+  let hue = mix(ownHue, CORE_COLOR, clamp(coreLuma / max(wanted, 0.0001), 0.0, 1.0));
+  // Never dim the metal: the delivered luminance is at least the pixel's own
+  // resting luminance, so the beam can only ever add light.
+  var rgb = toned(hue, max(max(wanted, ownLuma), baseLuma));
 
-  // Leading-edge rim and trailing shade: the derivative of the same weight
-  // tells which side the beam arrives from, so the metal reads as lifted.
-  let ahead = bandAt(src + vec2f(1.5, 1.5));
-  let behind = bandAt(src - vec2f(1.5, 1.5));
+  // A slight warm rim on the leading edge only: the derivative of the same
+  // weight says which side the beam arrives from. It brightens and never
+  // darkens, so it cannot draw a second contour inside the silhouette.
+  let ahead = bandAt(px + vec2f(1.5, 1.5));
+  let behind = bandAt(px - vec2f(1.5, 1.5));
   let rise = clamp(ahead - behind, 0.0, 1.0) * response2;
-  rgb = rgb + vec3f(1.0, 0.95, 0.82) * (rise * 0.05);
-  rgb = rgb - vec3f(0.10, 0.06, 0.02) * (rise * 0.04);
+  rgb = rgb + vec3f(1.0, 0.95, 0.82) * (rise * 0.06);
 
   // Soft shoulder on an SDR surface: a clipped white patch would destroy the
   // gold. The extended surface skips it, because there the value is meant to
   // leave the SDR range.
-  if (params.plateEdge.y < 0.5) {
+  if (params.window.y < 0.5) {
     let knee = vec3f(0.72, 0.72, 0.72);
     let over = max(rgb - knee, vec3f(0.0));
     rgb = min(rgb, knee) + over / (1.0 + over * 2.4);
   }
 
-  let alpha = coverage * show;
   let encoded = vec3f(encode(rgb.r), encode(rgb.g), encode(rgb.b));
   return vec4f(encoded * alpha, alpha);
 }
@@ -259,6 +330,7 @@ export interface ReadbackSummary {
  * @param bytesPerRow - padded row length in bytes.
  * @param width - row width in pixels.
  * @param height - rows.
+ * @param withColumns - also accumulate the per-column coverage.
  * @returns the readback summary.
  */
 export function summariseReadback(
@@ -302,26 +374,12 @@ export function summariseReadback(
       if (columns !== undefined) columns[x] += composited
     }
   }
-  if (columns !== undefined) for (let x = 0; x < width; x += 1) columns[x] /= height
+  if (columns !== undefined && height > 0) for (let x = 0; x < width; x += 1) columns[x] /= height
   return { peakEncoded, peakLinearChannel, peakLinearLuma, peakCompositedLuma, coveredPixels, columns }
 }
 
 /** Uniform payload size in bytes (7 vec4 slots). */
 const UNIFORM_BYTES = 7 * 16
-
-/** HARNESS plate rectangle in canvas pixels. */
-export interface PlateRect {
-  /** Left edge. */
-  readonly x: number
-  /** Top edge. */
-  readonly y: number
-  /** Width. */
-  readonly width: number
-  /** Height. */
-  readonly height: number
-  /** Corner radius. */
-  readonly rx: number
-}
 
 /** One frame's state. */
 export interface DrawFrame {
@@ -329,14 +387,14 @@ export interface DrawFrame {
   readonly centerX: number
   /** Sweep envelope, 0 while the lockup rests. */
   readonly sweep: number
+  /** Deformation amplitude, 0 restores the identity mapping. */
+  readonly warp: number
   /** Layout the canvas is sized to. */
   readonly layout: LockupLayout
   /** Effective tunables; the same object for `draw` and `measure`. */
   readonly params: SweepParams
   /** Requested peak linear luminance at the core centre. */
   readonly peakLinear: number
-  /** HARNESS plate, when the wordmark is one of the occupants. */
-  readonly plate: PlateRect | undefined
 }
 
 /** A renderer bound to one canvas. */
@@ -351,6 +409,8 @@ export interface SweepRenderer {
   resize(layout: LockupLayout): void
   /** Upload the composited material. */
   setMaterial(material: HTMLCanvasElement): void
+  /** Upload the geometric metal mask. */
+  setMask(mask: MaskImage): void
   /** Draw one frame into the canvas. */
   draw(frame: DrawFrame): void
   /** Draw one frame offscreen (no canvas write) and summarise the readback. */
@@ -452,42 +512,46 @@ export function createRenderer(
 
   const uniforms = new Float32Array(UNIFORM_BYTES / 4)
   let texture: GpuTexture | undefined
+  let maskTexture: GpuTexture | undefined
   let bindGroup: GpuBindGroup | undefined
   let disposed = false
 
   const writeUniforms = (frame: DrawFrame): void => {
-    const { layout, params, plate } = frame
+    const { layout, params } = frame
     const tilt = Math.tan((params.tiltDeg * Math.PI) / 180)
     // The extended ceiling is only requested on a canvas that survived with the
     // extended tone-mapping mode; otherwise the shader gets zero and uses the
     // SDR shoulder instead of writing values the compositor would clamp.
     const extended = effective.tone === 'extended'
     uniforms.set([
-      frame.centerX, layout.sigma, tilt, 0,
+      frame.centerX, layout.sigma, tilt, layout.supportRadius,
       layout.width, layout.height, layout.centerY, params.liftPx * layout.dpr,
-      frame.sweep, layout.coreSigma, layout.sigma * 0.42, extended ? frame.peakLinear : 0,
+      frame.sweep, layout.coreSigma, layout.collarSigma, extended ? frame.peakLinear : 0,
       params.magnifyPeak, params.plateFactor, params.bandGain, params.collarGain,
-      layout.magnifyRadiusPx, 0, 0, 0,
-      plate === undefined ? 0 : plate.x + plate.width / 2,
-      plate === undefined ? 0 : plate.y + plate.height / 2,
-      plate === undefined ? 0 : plate.width / 2,
-      plate === undefined ? 0 : plate.height / 2,
-      plate === undefined ? 0 : plate.rx, extended ? 1 : 0, 0, 0,
+      layout.magnifyRadiusPx, Math.max(0, Math.min(1, frame.warp)), params.bandAlbedoFloor, 0,
+      SUPPORT_INNER, extended ? 1 : 0, 0, 0,
+      maskTexture === undefined ? 0 : canvas.width,
+      maskTexture === undefined ? 0 : canvas.height,
+      maskTexture === undefined ? 0 : 1,
+      0,
     ], 0)
     device.queue.writeBuffer(uniform, 0, uniforms)
   }
 
-  const bind = (group: GpuBindGroup | undefined): GpuBindGroup => {
-    if (group !== undefined) return group
+  const bind = (): GpuBindGroup => {
+    if (bindGroup !== undefined) return bindGroup
     if (texture === undefined) throw new Error('brand-gold: no material uploaded')
-    return device.createBindGroup({
+    if (maskTexture === undefined) throw new Error('brand-gold: no metal mask uploaded')
+    bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: texture.createView() },
         { binding: 1, resource: sampler },
-        { binding: 2, resource: { buffer: uniform } },
+        { binding: 2, resource: maskTexture.createView() },
+        { binding: 3, resource: { buffer: uniform } },
       ],
     })
+    return bindGroup
   }
 
   /** Encode one frame into `view`, optionally copying the target out afterwards. */
@@ -496,8 +560,8 @@ export function createRenderer(
     view: unknown,
     copy?: { buffer: GpuBuffer; bytesPerRow: number; texture: GpuTexture },
   ): void => {
-    if (texture === undefined) return
-    const group = bind(bindGroup)
+    if (texture === undefined || maskTexture === undefined) return
+    const group = bind()
     writeUniforms(frame)
     const encoder = device.createCommandEncoder()
     const pass = encoder.beginRenderPass({
@@ -537,6 +601,9 @@ export function createRenderer(
       canvas.height = layout.height
       configure()
       bindGroup = undefined
+      // A mask is sized to the canvas, so a resize invalidates it.
+      maskTexture?.destroy()
+      maskTexture = undefined
     },
     setMaterial(material) {
       if (disposed) return
@@ -553,15 +620,43 @@ export function createRenderer(
       )
       bindGroup = undefined
     },
+    setMask(mask) {
+      if (disposed) return
+      const source = document.createElement('canvas')
+      source.width = mask.width
+      source.height = mask.height
+      const ctx = source.getContext('2d')
+      if (ctx === null) return
+      // A fresh backing buffer keeps the array typed as non-shared, which is
+      // what the ImageData constructor requires.
+      const pixels = new Uint8ClampedArray(mask.data.length)
+      pixels.set(mask.data)
+      const image = new ImageData(pixels, mask.width, mask.height)
+      // putImageData writes the exact bytes: no colour conversion, no sRGB
+      // decode. The texture is rgba8unorm for the same reason.
+      ctx.putImageData(image, 0, 0)
+      maskTexture?.destroy()
+      maskTexture = device.createTexture({
+        size: [mask.width, mask.height],
+        format: 'rgba8unorm',
+        usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_DST | TEXTURE_USAGE.RENDER_ATTACHMENT,
+      })
+      device.queue.copyExternalImageToTexture(
+        { source },
+        { texture: maskTexture, premultipliedAlpha: false },
+        [mask.width, mask.height],
+      )
+      bindGroup = undefined
+    },
     draw(frame) {
-      if (disposed || texture === undefined) return
+      if (disposed || texture === undefined || maskTexture === undefined) return
       render(frame, context.getCurrentTexture().createView())
     },
     async measure(frame) {
       const empty: ReadbackSummary = {
         peakEncoded: 0, peakLinearChannel: 0, peakLinearLuma: 0, peakCompositedLuma: 0, coveredPixels: 0,
       }
-      if (disposed || texture === undefined) return empty
+      if (disposed || texture === undefined || maskTexture === undefined) return empty
       let target: GpuTexture | undefined
       let buffer: GpuBuffer | undefined
       try {
@@ -608,6 +703,8 @@ export function createRenderer(
       disposed = true
       texture?.destroy()
       texture = undefined
+      maskTexture?.destroy()
+      maskTexture = undefined
       bindGroup = undefined
       uniform.destroy()
       try {

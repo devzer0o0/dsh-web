@@ -9,7 +9,7 @@
 
 纯浏览器半区的 DSH Web GUI 插件：它填充 shell 声明的两个侧栏品牌槽位
 （`sidebar.brand.mark` 与 `sidebar.brand.name`），用原始 DeepSeek Harness 品牌
-矢量绘制抛光黄金版本，并每 5 秒让一道斜向光束扫过整个品牌组合。
+矢量绘制抛光黄金版本，并每 3 秒让一道斜向光束扫过整个品牌组合。
 
 ## 它是什么
 
@@ -30,15 +30,21 @@
 
 | 参数 | 取值 | 位置 |
 |---|---|---|
-| 周期（本轮开始到下一轮开始） | 5000 ms | `SWEEP_PARAMS.periodMs` |
-| 单次可见窗口 | 3600 ms | `SWEEP_PARAMS.sweepMs` |
-| 周期内静止 | 1400 ms | `periodMs - sweepMs` |
-| 材质就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
-| 方向 | 仅从左向右 | `overlay.ts`（`startX` 到 `endX`） |
+| 周期（本轮开始到下一轮开始） | 3000 ms | `SWEEP_PARAMS.periodMs` |
+| 单次可见窗口 | 2700 ms | `SWEEP_PARAMS.sweepMs` |
+| 周期内静止 | 300 ms | `periodMs - sweepMs` |
+| 材质就绪后首次扫光 | 3000 ms | `SWEEP_PARAMS.firstDelayMs` |
+| A 段 入场 | 250 ms | `SWEEP_PARAMS.entryMs` |
+| B 段 遍历金属 | 2200 ms | `SWEEP_PARAMS.surfaceMs` |
+| C 段 退场 | 250 ms | `SWEEP_PARAMS.exitMs` |
+| 方向 | 仅从左向右 | `trajectory.ts`（`centerStart` 到 `centerEnd`） |
 | 相对竖直倾斜 | 25 度 | `SWEEP_PARAMS.tiltDeg` |
 | 宽金色亮带 FWHM | 组合宽度的 0.55 倍 | `SWEEP_PARAMS.mainBandFwhmRatio` |
 | 香槟光芯 FWHM | clamp(0.10 x W, 12, 24) CSS px | `SWEEP_PARAMS.coreFwhmRatio`、`coreFwhmMinPx`、`coreFwhmMaxPx` |
-| 入场与退场行程 | 0.10 x W + 倾斜补偿 | `SWEEP_PARAMS.travelMarginRatio`、`layout.ts` |
+| 光带有限支撑 | 3 sigma，末端精确归零 | `SWEEP_PARAMS.supportSigmas`、`beam.ts` |
+| 入场与退场行程 | 最外侧金属再向外一整个支撑半径 | `layout.ts`（`centerStart`、`centerEnd`） |
+| 金属资格 | 几何遮罩决定，与亮度无关 | `geometry-mask.ts`、`surface.ts` |
+| 亮带反照率下限 | 0.22 线性 | `SWEEP_PARAMS.bandAlbedoFloor` |
 | 局部放大 | 峰值 1.08 倍，半径 5 CSS px | `SWEEP_PARAMS.magnifyPeak`、`magnifyRadiusPx` |
 | 局部浮起 | 峰值 0.8 CSS px | `SWEEP_PARAMS.liftPx` |
 | 铭牌响应 | 金属的 55% | `SWEEP_PARAMS.plateFactor` |
@@ -59,27 +65,38 @@ FWHM 与观察者横着量到的 FWHM 是同一个数。σ 从不作为参数出
 | 画布 | 392 x 64 设备 px |
 | 宽亮带 FWHM | 103.4 CSS px |
 | 光芯 FWHM | 18.8 CSS px |
-| 总行程 | 496.8 设备 px = 248.4 CSS px |
-| 中心穿过本体时间 | 2725 ms |
-| 中心速度 | 约 69 CSS px/s |
-| 包络淡入 / 淡出 | 504 ms / 576 ms |
+| 光带支撑半径 | 186.3 CSS px |
+| 金属在光束坐标上的范围 | 3.3 .. 194.1 CSS px |
+| 中心行程 | -187.0 .. 384.4 CSS px |
+| 中心穿过金属的时间 | 2200 ms（B 段） |
+| 中心穿越速度 | 约 87 CSS px/s |
+| 包络 | 入场 250 ms 内开启，从第一块金属到最后一块全程满幅，尾部离开后才收束 |
 
 各部分如何协作：
 
 1. `layout.ts` 从两个占位**实际渲染**的盒子出发，把各自 viewBox 映射进同一套画布坐标。
    两个 viewBox 从不被当成同一个空间，光束会连续穿过图标与字标之间的空隙，而不是在字标
-   起点重新开始。行程只由组合尺寸与倾角算出，与亮带宽度无关，因此加宽亮带不会提高穿越速度。
+   起点重新开始。行程按**整条光带**计算：光束坐标
+   `q = x + (y - centerY) * tan(tilt)` 遍历每个金属顶点得到 `qMin/qMax`，支撑半径 `R`
+   由亮带 σ 推出，中心从 `qMin - R - padding` 走到 `qMax + R + padding`。因此第一块金属
+   距离入场点有整条光带那么远，最后一块金属距离退场点同样如此，而画布本身只覆盖 Logo。
 2. `material.ts` 在每次布局或主题变化时合成一次实时材质：每个 SVG 内联计算后的绘制属性、
    按各自变换画入同一画布，作为 `rgba8unorm-srgb` 纹理上传，sRGB 解码交给硬件。
-3. `renderer.ts` 通过**逆向形变**采样该纹理。距轴 `d` 的源像素落到 `d * scale` 处，因此中心附近
+3. `geometry-mask.ts` 按**原始矢量**光栅出金属遮罩：鲸鱼填充区、deepseek 每个实心笔画、
+   HARNESS 底板，并在底板上挖掉深色铭文、在每个字母上保留内部空洞。它是 `rgba8unorm`
+   的覆盖数据而不是 sRGB 颜色图，用逐扫描线、每像素 4 次子采样的方式生成，DPR 3 也只要
+   几毫秒。一个像素是不是金属由它所属的几何决定，亮度只决定它返回多少光。亮带额外乘一个
+   线性反照率下限，因此最暗的金色与铭牌也会真的反光，而不是被光带跳过。
+4. `renderer.ts` 通过**逆向形变**采样该纹理。距轴 `d` 的源像素落到 `d * scale` 处，因此中心附近
    的细节确实被拉开；位移被限制在 `magnifyRadiusPx` 内，宽亮带不会把远处材质拉过来。同一材质上
    GPU 与 `beam.ts` 的位移误差在 1 设备 px 以内。
-4. 画布在光束之外完全透明。静止时屏幕上只有下方那张 SVG，因此不存在两份轮廓叠加，扫光结束
+5. 画布在光束之外完全透明。静止时屏幕上只有下方那张 SVG，因此不存在两份轮廓叠加，扫光结束
    后形状、大小、位置与颜色精确恢复。
-5. 逐帧绘制只发生在 3600 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
+6. 逐帧绘制只发生在 2700 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
    的那一轮直接跳过、不补播，也不会出现重叠循环。
-6. 首次扫光在材质上传完成之后才开始计时，而不是在「拿到 GPU 设备」时就计时，因此第一轮不会
-   对着空画布运行。
+7. 首次扫光在材质**与遮罩**都上传完成之后才开始计时，并且整整等一个周期，因此第一轮不会
+   对着空画布运行。普通重建保留原有相位：只有首次初始化、从隐藏标签页恢复和 GPU 重置会重新
+   建立原点。
 
 `prefers-reduced-motion: reduce` 在每次重建与每次 change 事件时重新读取：没有位移、没有放大、
 没有周期性高光，只保留静态精细金色，开关即时生效、无需刷新。

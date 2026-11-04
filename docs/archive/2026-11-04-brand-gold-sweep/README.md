@@ -9,6 +9,14 @@ dark theme, native 24px lockup height.
 | `cycle-frames.png` | Six frames from one recorded cycle: rest, beam entering, whale lit, wordmark lit, HARNESS plate lit, fully restored |
 | `cycle.mp4` | The 16s capture the frames were taken from (60 fps) |
 
+## Beam width (after the fivefold widening)
+
+`influenceSigmaRatio` is 0.125, so the soft influence zone is about 1/8 of the
+lockup width per side. On the 340px lockup the lit region spans up to 117
+columns at mid-sweep, covering several letters at once; the specular core stays
+about 1-2 CSS px. `wider-beam-frames.png` shows the wider zone crossing the
+whale and the first half of the wordmark.
+
 ## Measurements from the same capture
 
 - Sweep starts at frames 97, 397 and 697 at 60 fps: period 5000 ms,

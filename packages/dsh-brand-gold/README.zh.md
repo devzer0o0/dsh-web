@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>侧栏品牌组合的黄金版本，带周期性金属扫光</strong><br>
-  <em>原始矢量 · 单一时轴的光束 · 局部放大与浮起 · 宿主保留扩展亮度时启用真实 HDR 高光</em>
+  <em>原始矢量 · 单一时轴的光束 · 宽金色亮带配短促香槟光芯 · 局部放大与浮起</em>
 </p>
 
 纯浏览器半区的 DSH Web GUI 插件：它填充 shell 声明的两个侧栏品牌槽位
@@ -31,95 +31,148 @@
 | 参数 | 取值 | 位置 |
 |---|---|---|
 | 周期（本轮开始到下一轮开始） | 5000 ms | `SWEEP_PARAMS.periodMs` |
-| 单次可见扫光 | 1800 ms | `SWEEP_PARAMS.sweepMs` |
-| 周期内静止 | 3200 ms | `periodMs - sweepMs` |
-| 就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
+| 单次可见窗口 | 3600 ms | `SWEEP_PARAMS.sweepMs` |
+| 周期内静止 | 1400 ms | `periodMs - sweepMs` |
+| 材质就绪后首次扫光 | 5000 ms | `SWEEP_PARAMS.firstDelayMs` |
 | 方向 | 仅从左向右 | `overlay.ts`（`startX` 到 `endX`） |
 | 相对竖直倾斜 | 25 度 | `SWEEP_PARAMS.tiltDeg` |
-| 影响区宽度 | 组合宽度的 125%（σ） | `SWEEP_PARAMS.influenceSigmaRatio` |
-| 放大作用半径 | 5 CSS px | `SWEEP_PARAMS.magnifyRadiusPx` |
-| 高光核心 | 约 1-2 CSS px | `SWEEP_PARAMS.coreSigmaPx` |
-| 局部放大峰值 | 1.08 倍 | `SWEEP_PARAMS.magnifyPeak` |
-| 局部浮起峰值 | 0.8 CSS px | `SWEEP_PARAMS.liftPx` |
+| 宽金色亮带 FWHM | 组合宽度的 0.55 倍 | `SWEEP_PARAMS.mainBandFwhmRatio` |
+| 香槟光芯 FWHM | clamp(0.10 x W, 12, 24) CSS px | `SWEEP_PARAMS.coreFwhmRatio`、`coreFwhmMinPx`、`coreFwhmMaxPx` |
+| 入场与退场行程 | 0.10 x W + 倾斜补偿 | `SWEEP_PARAMS.travelMarginRatio`、`layout.ts` |
+| 局部放大 | 峰值 1.08 倍，半径 5 CSS px | `SWEEP_PARAMS.magnifyPeak`、`magnifyRadiusPx` |
+| 局部浮起 | 峰值 0.8 CSS px | `SWEEP_PARAMS.liftPx` |
 | 铭牌响应 | 金属的 55% | `SWEEP_PARAMS.plateFactor` |
+| 光芯请求峰值 | 短时 1600 nit | `SWEEP_PARAMS.peakNits` |
 
-参数集中在 `src/client/sweep.ts`，几何在 `beam.ts`（纯算术，有单测），着色器与之逐一对应。
+参数集中在 `src/client/sweep.ts`，几何与配光在 `beam.ts`、`light.ts`（纯算术，有单测），
+着色器与之逐项对应。
+
+**宽度是 CSS px 的可见半高全宽（FWHM），在同一水平截面上测量。** 存在倾角时，光束坐标
+`u = (x - cx) + (y - cy) * tan(tilt)` 在任意固定行上每横移 1 CSS px 恰好增加 1，因此 `u` 上的
+FWHM 与观察者横着量到的 FWHM 是同一个数。σ 从不作为参数出现：`beam.ts` 按
+`sigma = FWHM / (2 * sqrt(ln 2))` 推导，测试量的是最终光分布而不是输入参数。
+
+在出厂 188 x 24 CSS px 组合、DPR 2 上的实测：
+
+| 量 | 取值 |
+|---|---|
+| 画布 | 392 x 64 设备 px |
+| 宽亮带 FWHM | 103.4 CSS px |
+| 光芯 FWHM | 18.8 CSS px |
+| 总行程 | 496.8 设备 px = 248.4 CSS px |
+| 中心穿过本体时间 | 2725 ms |
+| 中心速度 | 约 69 CSS px/s |
+| 包络淡入 / 淡出 | 504 ms / 576 ms |
 
 各部分如何协作：
 
 1. `layout.ts` 从两个占位**实际渲染**的盒子出发，把各自 viewBox 映射进同一套画布坐标。
    两个 viewBox 从不被当成同一个空间，光束会连续穿过图标与字标之间的空隙，而不是在字标
-   起点重新开始。
+   起点重新开始。行程只由组合尺寸与倾角算出，与亮带宽度无关，因此加宽亮带不会提高穿越速度。
 2. `material.ts` 在每次布局或主题变化时合成一次实时材质：每个 SVG 内联计算后的绘制属性、
    按各自变换画入同一画布，作为 `rgba8unorm-srgb` 纹理上传，sRGB 解码交给硬件。
-3. `renderer.ts` 通过**逆向形变**采样该纹理。放大、浮起、高光与明暗全部来自同一个光束权重，
-   材质、轮廓与边缘透明度由同一个函数形变。没有第二份轮廓、没有固定轮廓遮罩，因此不会出现
-   采样空洞、新旧轮廓双影或被裁掉的笔画。
+3. `renderer.ts` 通过**逆向形变**采样该纹理。距轴 `d` 的源像素落到 `d * scale` 处，因此中心附近
+   的细节确实被拉开；位移被限制在 `magnifyRadiusPx` 内，宽亮带不会把远处材质拉过来。同一材质上
+   GPU 与 `beam.ts` 的位移误差在 1 设备 px 以内。
 4. 画布在光束之外完全透明。静止时屏幕上只有下方那张 SVG，因此不存在两份轮廓叠加，扫光结束
    后形状、大小、位置与颜色精确恢复。
-5. 逐帧绘制只发生在 1800 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
+5. 逐帧绘制只发生在 3600 ms 窗口内。周期其余时间只保留一个定时器；页面或 Logo 不可见时错过
    的那一轮直接跳过、不补播，也不会出现重叠循环。
+6. 首次扫光在材质上传完成之后才开始计时，而不是在「拿到 GPU 设备」时就计时，因此第一轮不会
+   对着空画布运行。
 
-`prefers-reduced-motion: reduce` 下完全不注册：没有位移、没有放大、没有周期性强闪，
-只保留静态精细金色。
+`prefers-reduced-motion: reduce` 在每次重建与每次 change 事件时重新读取：没有位移、没有放大、
+没有周期性高光，只保留静态精细金色，开关即时生效、无需刷新。
 
 ## 颜色管线
 
-三个空间严格分开，每一步都注明自己在哪一层：
+空间严格分开，每一步都注明自己在哪一层：
 
 | 步骤 | 空间 | 位置 |
 |---|---|---|
 | CSS 绘制属性与 SVG 光栅 | sRGB 编码 | `raster.ts`、`material.ts` |
 | 纹理解码 | 由 `rgba8unorm-srgb` 在硬件完成 | `renderer.ts` |
-| 光照、放大、高光 | 线性光 | `renderer.ts` 中的着色器 |
-| 输出 | 扩展 sRGB 编码 | 着色器 `encode()`、`color.ts` 的 `linearToSrgb()` |
+| 光照、放大、高光 | 线性光 | `renderer.ts` 中的着色器，`light.ts` 同构 |
+| 输出 | sRGB 编码，1.0 以上沿用同一分支延续 | 着色器 `encode()`、`color.ts` 的 `linearToSrgb()` |
 | 透明度 | 直通，最终写出时预乘 | 着色器 |
 
-编码在 1.0 以上线性延续，扩展值能进入帧缓冲而不是被传递函数夹断。`HDR_PEAK` 是高光项的
-线性倍数，从不被当作 nits 或物理亮度声明。
+`linearToSrgb` 在白点两侧都使用 `1.055 * v^(1/2.4) - 0.055`，因此线性 4.0 编码为约 1.82，
+而不是原样输出 4.0。解码是它的精确逆函数，读回值才能被当作线性光，而不是被当作线性光的
+编码通道。
+
+## 亮度：1600 nit 目标
+
+峰值是**请求的最终线性亮度**，不是叠加在其它增益之上的增益：
+
+```
+requestedPeakLinear = peakNits / sdrReferenceWhiteNits
+```
+
+其中 `peakNits = 1600`（用户给出的屏幕短时峰值），参考白为实测或假定值。光芯只花掉上限之下
+剩余的预算——`max(ceiling - lit, 0)`——因此亮带、香槟领与光芯相加不会超过目标，合成峰值在
+构造上就等于目标。每个色调先按自身亮度归一化，所以「红色通道 1200」永远不能冒充「1200 nit」。
+
+**当前宿主上已知与未知的量：**
+
+| 量 | 取值 | 来源 |
+|---|---|---|
+| 屏幕峰值能力 | 1600 nit | 用户提供 |
+| SDR 参考白 | 203 nit | **假定值**（macOS 默认），未在本地实测 |
+| `requestedPeakLinear` | 7.88 | 由上两行推导 |
+| 可用 HDR 余量 | 未知 | 本插件没有可获得该值的接口 |
+| 屏幕实测亮度 | 未测量 | 见下 |
+
+假定参考白是一个可调项（`SWEEP_PARAMS.sdrWhiteNits` 接受实测值，`assumedSdrWhiteNits` 是回落），
+诊断会记录用了哪一个，因此接入实测值不需要改着色器。**本文不声称实测到 1600 nit**：插件只报告
+请求的相对亮度，并明确说明绝对读数是缺失的。
 
 ## 扩展亮度：实测了什么、没实测什么
 
-这里必须分开写，因为此前的版本把两者混为一谈。
+三个层级，刻意分开。
 
-**已在运行中的桌面客户端验证**（Electron 44.7 / Chromium 152.0.7977.130、macOS 27.2、
-内置 Liquid Retina XDR）：
+**1. 渲染目标中确实存在扩展值——已实测。**
 
-- 扫光运行：60 fps 录屏中连续三个周期，起点间隔 5000 ms，每轮可见窗口约 1.0 s。
-- 光束依次经过鲸鱼、字标、HARNESS 铭牌；铭牌约以一半幅度受光，铭牌文字始终深色清晰。
-- 静止状态完整恢复：一轮前后两帧的差异最多为若干抗锯齿采样，单通道不超过 15/255。
-- 静止期没有逐帧绘制：着色器只在窗口内提交。
-- 没有任何矩形覆盖：未受光像素透明，镂空、鲸鱼切口、背景与品牌间距保持暗色。
+在真实 GPU 上（Chromium 156，直接驱动出厂 `createRenderer` 的独立测试台），金色材质上一帧
+扫光中期的读回为：
 
-**已实现，且只在着色器层面验证**：
+| 模式 | 实际生效配置 | 编码峰值 | 线性亮度峰值 | 目标 |
+|---|---|---|---|---|
+| 扩展 | `premultiplied` + `extended`，`rgba16float`，`srgb` | 2.50 | 7.869 | 7.882 |
+| SDR | `premultiplied` + `standard` | 0.997 | 0.882 | 不适用 |
 
-- 画布为 `rgba16float`，配置 `toneMapping: { mode: 'extended' }` 与显式 `colorSpace: 'srgb'`。
-  每轮会有一帧被重绘到离屏 `rgba16float` 目标，并复制回映射缓冲区；读回峰值线性值大于 1.0，
-  证明扩展编码在着色器自身输出中确实产生了扩展值。
-- 画布状态与显示状态分开上报：提交帧时为 `drawing`，读回大于 1.02 才为 `verified`。
+扩展一行是着色器自身输出中正确的大于 1.0 的线性值；SDR 一行是同一着色器去掉上限的结果，
+两者的差异只来自色调映射模式，不是两条代码路径。
 
-**未验证：额外亮度是否真的到达面板。**
+**2. 合成路径能够呈现扩展亮度——已在宿主中实测。**
 
-- 在参考宿主上，显示器当前扩展亮度余量约为 1.2 倍，而内置 XDR 面板标称潜力为 16 倍。
-  本进程可用的每条 ScreenCaptureKit 路径（截图与串流、sRGB/bgra10/半浮点像素格式、
-  `captureDynamicRange` 各档位）读回都被夹在 1.0，包括全屏白色参考。缺少能保留 1.0 以上
-  数值的采集路径，显示端结论在此无法测量，因此不作声明。
-- 超出 1.0 的输出在着色器与存储格式中是真实的；合成器与面板是否呈现它，取决于系统当时
-  给出的余量，本插件既不能控制也无法读取。
+在运行中的桌面客户端里，画布通过 `getConfiguration()` 回报
+`toneMapping: { mode: 'extended' }`、`alphaMode: 'premultiplied'`、`format: 'rgba16float'`、
+`colorSpace: 'srgb'`，控制器依据一次覆盖加权的读回（7.876 线性，按 203 nit 假定约等于 1599 nit）
+发布 `displayVerified: true`。注意本宿主上 `(dynamic-range: high)` 仍然为 `false`：该媒体查询
+只是显示端提示，真正决定的是画布契约。
 
-因此高光首先被调成金属反射：在 SDR 表面上同一着色器把扩展项置零并施加柔和肩部，
-受光金属变亮但不会夹成白块。
+**3. 面板实际发出 1600 nit——未测量。**
+
+- 本地没有任何能保留 1.0 以上数值的采集路径，因此截图不能作为证据；SDR 截图在 255 处夹断，
+  对 nits 一无所证。
+- 插件只暴露 `displayVerified`（合成器保住了扩展值），从不把它当成物理测量。
+- 物理读数需要在光芯闪亮时用校准过的亮度计对准它，并记录参考白与测量几何。本任务没有做。
+
+在只保留标准色调映射的表面上，同一着色器把扩展上限置零并施加柔和肩部，受光金属变亮但不会
+夹成白块——宽亮带与慢速穿越保持不变。
 
 ## 验证
 
 ```sh
 cd packages/dsh-brand-gold
-pnpm test        # 31 个单测：时序、光束几何、颜色、坐标系、生命周期
+pnpm test        # 69 个单测：时序、光束几何、配光分布、颜色编解码、坐标系、
+                 # 渲染接线、生命周期
 ../../node_modules/.bin/tsdown
 ```
 
-单测覆盖的是最容易悄悄坏掉的特性：周期是开始到开始、形变可逆（无采样空洞、无重影）、
-扩展编码保留 1.0 以上数值、组合塌缩时布局拒绝构建、dispose 只释放自己的监听且重复调用安全。
+单测针对的是最容易悄悄坏掉的特性：最终亮带的 FWHM（而不是输入参数）、光芯 FWHM、合成峰值
+不越过请求上限、亮带仍保留金色、铭牌为 55%、形变向外且可逆、1.0 以上的扩展编解码往返、
+组合塌缩时布局拒绝构建、行程不随亮带增长，以及渲染器确实把解析出的参数交给着色器。
 
 ## 安装
 
@@ -151,8 +204,15 @@ dsh plugin --profile web add @linxin666/dsh-client-ui-brand-gold@latest
 `window.__DSH_BRAND_GOLD__.state` 与 `.records()`。状态把生命周期阶段
 （`anchor-missing`、`anchor-hidden`、`zero-size`、`capability-missing`、
 `gpu-init-failed`、`material-failed`、`composite-failed`、`drawing`、
-`verified`）与 GPU 能力判定分开上报，缓冲区是定长环形。窗口标题从不被改写，
-也不发出任何网络探针请求。
+`verified`）与 GPU 能力判定分开上报，并补充：
+
+- `mode` / `effectiveMode`：请求值与 `getConfiguration()` 读回值，alpha 与色调映射分别列出；
+- `requestedPeakLinear`、`peakLinear`、`peakComposited`、`measuredNits`；
+- `displayVerified`：合成器是否保住了扩展值；
+- `calibration`：参考白与余量来源（`assumed/headroom:unknown`）；
+- 环形缓冲中的 `beam` 记录：每秒约十次的光束位置与包络采样，上面的穿越时间与速度即由它测得。
+
+GPU 读回会分配纹理与映射缓冲区，因此只在开启诊断时执行，绝不在每位用户的机器上每周期跑一次。
 
 ## 许可
 

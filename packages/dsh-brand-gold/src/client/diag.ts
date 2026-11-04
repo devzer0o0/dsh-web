@@ -10,8 +10,11 @@
  * @module dsh-brand-gold/diag
  */
 
-/** Ring-buffer capacity; enough for several sweep cycles of state changes. */
-const CAPACITY = 120
+/**
+ * Ring-buffer capacity. Beam sampling records about ten entries a second, so
+ * this holds three complete sweep cycles plus the lifecycle events around them.
+ */
+const CAPACITY = 320
 
 /** One timestamped record. */
 export interface DiagRecord {

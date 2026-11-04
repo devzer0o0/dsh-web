@@ -1,24 +1,46 @@
 /**
  * Beam geometry and the local warp it drives.
  *
- * The shader in `hdr.ts` mirrors these functions exactly; keeping them here as
- * plain arithmetic makes them testable without a GPU.
+ * Widths are defined once, here, as a **visible full width at half maximum
+ * measured on a horizontal cross-section of the lockup** (the row of pixels an
+ * observer sees). With a tilt, the beam coordinate
+ *
+ *     u = (x - centerX) + (y - centerY) * tan(tilt)
+ *
+ * advances one CSS pixel per horizontal pixel on any fixed row, so the FWHM in
+ * `u` and the FWHM across a horizontal cross-section are the same number. The
+ * CPU geometry, the WGSL and the tests all use that one definition; nothing is
+ * expressed as a raw sigma.
  *
  * @module dsh-brand-gold/beam
  */
 
-/**
- * Radius, in CSS pixels, inside which the magnification actually pulls
- * material. The influence zone is a wide light, but a magnification that scaled
- * with its full width would sample material tens of pixels away and ghost the
- * stroke; the optical effect is local by nature.
- */
 /** A point in canvas CSS pixels. */
 export interface Point {
   /** Horizontal position. */
   readonly x: number
   /** Vertical position. */
   readonly y: number
+}
+
+/**
+ * Widths of the beam, in CSS pixels.
+ *
+ * The wide band, the champagne core and the soft surround share one centre and
+ * one tilt but keep their own width and brightness; a single sigma never stands
+ * in for all three.
+ */
+export interface BeamWidths {
+  /** Full width at half maximum of the wide gold band, in CSS pixels. */
+  readonly mainFwhm: number
+  /** Full width at half maximum of the champagne core, in CSS pixels. */
+  readonly coreFwhm: number
+  /** Gaussian sigma equivalent of `mainFwhm`, in CSS pixels. */
+  readonly mainSigma: number
+  /** Gaussian sigma equivalent of `coreFwhm`, in CSS pixels. */
+  readonly coreSigma: number
+  /** Gaussian sigma of the champagne collar, in CSS pixels. */
+  readonly collarSigma: number
 }
 
 /** Geometry of the beam at one instant. */
@@ -29,14 +51,78 @@ export interface BeamSpec {
   readonly centerY: number
   /** Tangent of the tilt away from vertical. */
   readonly tanTilt: number
-  /** Falloff width of the soft influence zone, in CSS pixels. */
+  /** Gaussian sigma of the wide band, in CSS pixels. */
   readonly sigma: number
+  /** Gaussian sigma of the champagne core, in CSS pixels. */
+  readonly coreSigma: number
+  /** Gaussian sigma of the champagne collar between core and band, in CSS pixels. */
+  readonly collarSigma: number
   /** Peak upward displacement, in CSS pixels. */
   readonly liftPx: number
   /** Peak magnification at the beam centre. */
   readonly magnifyPeak: number
-  /** Radius, in CSS pixels, inside which magnification pulls material. */
+  /** Radius, in CSS pixels, inside which magnification moves material. */
   readonly magnifyRadiusPx: number
+}
+
+/** Ratio that keeps the core from swallowing a small lockup's band. */
+const CORE_TO_MAIN_MAX = 0.4
+
+/** The collar sits between the core and the band: narrower than the band. */
+const COLLAR_TO_MAIN = 0.42
+
+/**
+ * Convert a visible FWHM into the sigma of `exp(-(u/sigma)^2)`.
+ * @param fwhm - full width at half maximum, in the same unit as the result.
+ * @returns the equivalent sigma.
+ */
+export function fwhmToSigma(fwhm: number): number {
+  return fwhm / (2 * Math.sqrt(Math.log(2)))
+}
+
+/**
+ * Inverse of {@link fwhmToSigma}, used by the diagnostics and the tests.
+ * @param sigma - Gaussian sigma.
+ * @returns the visible full width at half maximum.
+ */
+export function sigmaToFwhm(sigma: number): number {
+  return sigma * 2 * Math.sqrt(Math.log(2))
+}
+
+/**
+ * Widths of the two bands for a lockup of a given width.
+ *
+ * The core is clamped into a pixel range so it stays visible on a small icon,
+ * then capped relative to the wide band so a compact lockup is not flooded by
+ * its own floor.
+ *
+ * @param lockupWidth - actual layout width of the lockup, in CSS pixels.
+ * @param mainBandFwhmRatio - band width as a fraction of the lockup width.
+ * @param coreFwhmRatio - core width as a fraction of the lockup width.
+ * @param coreFwhmMinPx - smallest core width, in CSS pixels.
+ * @param coreFwhmMaxPx - largest core width, in CSS pixels.
+ * @returns the visible widths and their sigma equivalents, in CSS pixels.
+ */
+export function beamWidths(
+  lockupWidth: number,
+  mainBandFwhmRatio: number,
+  coreFwhmRatio: number,
+  coreFwhmMinPx: number,
+  coreFwhmMaxPx: number,
+): BeamWidths {
+  const width = Math.max(lockupWidth, 1)
+  const mainFwhm = width * mainBandFwhmRatio
+  const requested = width * coreFwhmRatio
+  const clamped = Math.min(Math.max(requested, coreFwhmMinPx), Math.max(coreFwhmMaxPx, coreFwhmMinPx))
+  const coreFwhm = Math.min(clamped, mainFwhm * CORE_TO_MAIN_MAX)
+  const mainSigma = fwhmToSigma(mainFwhm)
+  return {
+    mainFwhm,
+    coreFwhm,
+    mainSigma,
+    coreSigma: fwhmToSigma(coreFwhm),
+    collarSigma: mainSigma * COLLAR_TO_MAIN,
+  }
 }
 
 /**
@@ -59,14 +145,36 @@ export function beamCoordinate(point: Point, beam: BeamSpec): number {
 }
 
 /**
- * Smooth influence weight of the beam at one point.
+ * Wide gold band weight at one point.
  * @param point - canvas CSS pixel.
  * @param beam - current beam geometry.
- * @returns 1 at the axis, decaying to 0 outside the influence zone.
+ * @returns 1 on the axis, 0.5 at the band's half width, decaying to 0 outside.
  */
 export function beamWeight(point: Point, beam: BeamSpec): number {
   const u = beamCoordinate(point, beam)
   return Math.exp(-(u * u) / (beam.sigma * beam.sigma))
+}
+
+/**
+ * Champagne core weight at one point.
+ * @param point - canvas CSS pixel.
+ * @param beam - current beam geometry.
+ * @returns 1 on the axis, 0.5 at the core's half width.
+ */
+export function coreWeight(point: Point, beam: BeamSpec): number {
+  const u = beamCoordinate(point, beam)
+  return Math.exp(-(u * u) / (beam.coreSigma * beam.coreSigma))
+}
+
+/**
+ * Champagne collar weight at one point.
+ * @param point - canvas CSS pixel.
+ * @param beam - current beam geometry.
+ * @returns 1 on the axis, 0.5 at the collar's half width.
+ */
+export function collarWeight(point: Point, beam: BeamSpec): number {
+  const u = beamCoordinate(point, beam)
+  return Math.exp(-(u * u) / (beam.collarSigma * beam.collarSigma))
 }
 
 /**
@@ -81,6 +189,12 @@ export function magnifyAt(point: Point, beam: BeamSpec): number {
 
 /**
  * Displacement the warp applies to a source point.
+ *
+ * A source pixel `d` pixels off the axis lands `d * scale` pixels off it, so
+ * features near the centre are genuinely spread apart by `scale`. The
+ * displacement is bounded to the magnification radius: the light may be wide,
+ * but it must never pull material in from tens of pixels away.
+ *
  * @param point - source position in canvas CSS pixels.
  * @param beam - current beam geometry.
  * @returns the offset the point appears at.
@@ -92,9 +206,9 @@ export function warpOffset(point: Point, beam: BeamSpec): Point {
   const ny = beam.tanTilt / normalLength
   const distance = (point.x - beam.centerX) * nx + (point.y - beam.centerY) * ny
   const scale = 1 + (beam.magnifyPeak - 1) * weight
-  // Bounded neighbourhood: beyond it the material is not magnified, only lit.
   const local = Math.max(-beam.magnifyRadiusPx, Math.min(distance, beam.magnifyRadiusPx))
-  const radial = local * (1 / scale - 1)
+  // Forward warp: magnified material moves away from the axis, by (scale - 1).
+  const radial = local * (scale - 1)
   return { x: nx * radial, y: ny * radial - beam.liftPx * weight }
 }
 

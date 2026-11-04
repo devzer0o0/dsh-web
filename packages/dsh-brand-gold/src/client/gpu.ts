@@ -17,6 +17,8 @@ export type GpuPhase =
   | 'unknown'
   | 'unsupported-webgpu'
   | 'unsupported-range'
+  // `unsupported-range` means "WebGPU exists but the display reports no extended
+  // range"; it is an SDR verdict, not a refusal to draw.
   | 'adapter-missing'
   | 'device-missing'
   | 'lost'
@@ -108,10 +110,13 @@ export function acquireDevice(): Promise<GpuDevice | undefined> {
   if (device !== undefined) return Promise.resolve(device)
   if (ready !== undefined) return ready
   const probe = probeCapabilities()
-  if (probe.phase === 'unsupported-webgpu' || probe.phase === 'unsupported-range') {
+  if (!probe.hasGpu) {
     diag.record('gpu.unsupported', { phase: probe.phase, reason: probe.reason })
     return Promise.resolve(undefined)
   }
+  // A missing extended range is not a reason to refuse a device: the same
+  // shader draws the wide, slow SDR sweep, and only the over-unity ceiling is
+  // dropped. The verdict stays in `status` so the diagnostic keeps them apart.
   const mine = generation
   ready = (async (): Promise<GpuDevice | undefined> => {
     try {
@@ -144,6 +149,7 @@ export function acquireDevice(): Promise<GpuDevice | undefined> {
         ready = undefined
         status = { ...probeCapabilities(), phase: 'lost', reason: info?.message ?? info?.reason ?? 'device lost' }
         diag.record('gpu.lost', { reason: status.reason })
+        return undefined
       })
       const caps = probeCapabilities()
       status = { ...caps, phase: 'ready', reason: 'device ready' }

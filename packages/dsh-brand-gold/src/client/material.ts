@@ -45,15 +45,24 @@ export async function compositeMaterial(
   for (const part of parts) {
     const transform = layout.parts.get(part.id)
     if (transform === undefined) continue
-    const width = Math.max(1, Math.round(transform.box.width * transform.scale + 4))
-    const height = Math.max(1, Math.round(transform.box.height * transform.scale + 4))
+    // `transform.scale` already folds in the DPR, and `box` is in CSS pixels:
+    // multiplying the box by the scale once gives device pixels. Applying the
+    // DPR a second time here would rasterize the part at double resolution.
+    const width = Math.max(1, Math.round(transform.box.width * transform.scale) + 4)
+    const height = Math.max(1, Math.round(transform.box.height * transform.scale) + 4)
     let bitmap: ImageBitmap
     try {
       bitmap = await rasterize(serializeSvg(part.svg, width, height), width, height)
     } catch {
       continue
     }
-    ctx.drawImage(bitmap, transform.offsetX, transform.offsetY, transform.box.width * transform.scale, transform.box.height * transform.scale)
+    ctx.drawImage(
+      bitmap,
+      transform.offsetX,
+      transform.offsetY,
+      transform.box.width * transform.scale,
+      transform.box.height * transform.scale,
+    )
     bitmap.close()
     drawn += 1
   }

@@ -5,6 +5,11 @@
  * one sweep start to the next (never "play, then wait"), the sweep itself is a
  * fixed window inside that period, and the first one waits for the resources.
  *
+ * Widths are expressed as a **visible** full width at half maximum, on a
+ * horizontal cross-section of the lockup (the same row of pixels an observer
+ * sees), in CSS pixels. `beam.ts` owns the conversion to the sigma the
+ * profile uses, and the WGSL in `renderer.ts` mirrors that conversion exactly.
+ *
  * @module dsh-brand-gold/sweep
  */
 
@@ -19,57 +24,84 @@ export interface SweepParams {
   /** Lean of the beam away from vertical, in degrees. */
   readonly tiltDeg: number
   /**
-   * Beam falloff width (sigma) as a fraction of the lockup width.
-   *
-   * This is the soft influence zone: it drives magnification, lift, the rim and
-   * the shading together. It is deliberately much wider than the specular core
-   * (see `coreSigmaPx`), so the beam reads as a wide lit region rather than a
-   * hairline.
+   * Full width at half maximum of the wide gold band, as a fraction of the
+   * lockup width, measured on a horizontal cross-section.
    */
-  readonly influenceSigmaRatio: number
-  /** Sigma of the sharp specular core, in CSS pixels (about a 1-2px core). */
-  readonly coreSigmaPx: number
+  readonly mainBandFwhmRatio: number
+  /**
+   * Full width at half maximum of the champagne core, as a fraction of the
+   * lockup width, before the pixel floor and ceiling are applied.
+   */
+  readonly coreFwhmRatio: number
+  /** Smallest core width, in CSS pixels. */
+  readonly coreFwhmMinPx: number
+  /** Largest core width, in CSS pixels. */
+  readonly coreFwhmMaxPx: number
   /** Peak local magnification at the beam centre. */
   readonly magnifyPeak: number
   /**
-   * Radius, in CSS pixels, inside which magnification pulls material. The
-   * influence zone can be far wider than this without ghosting, because the
-   * optical effect is local even when the light is broad.
+   * Radius, in CSS pixels, inside which magnification moves material. The band
+   * can be far wider than this without ghosting, because the optical effect is
+   * local even when the light is broad.
    */
   readonly magnifyRadiusPx: number
   /** Peak upward lift at the beam centre, in CSS pixels. */
   readonly liftPx: number
-  /** Extra linear gain applied to the metal under the beam. */
-  readonly metalGain: number
-  /** Linear gain of the sharp specular core. */
-  readonly coreGain: number
-  /** Extended-range gain added during the sweep (linear, relative to SDR white). */
-  readonly hdrGain: number
+  /** Extra linear gain applied to the gold band over the metal. */
+  readonly bandGain: number
+  /** Champagne collar added around the core, relative to SDR white. */
+  readonly collarGain: number
   /** HARNESS plate attenuation: the plate reacts, but less than the metal. */
   readonly plateFactor: number
-  /** Extra travel beyond the lockup bounds, in CSS pixels, so the beam enters and leaves. */
-  readonly travelMarginPx: number
+  /** Share of the sweep window spent fading the band in. */
+  readonly fadeInRatio: number
+  /** Share of the sweep window spent fading the band out. */
+  readonly fadeOutRatio: number
+  /**
+   * Horizontal travel beyond the lockup, as a fraction of its width. The band
+   * only has to clear the lockup far enough for its envelope to reach zero;
+   * making this scale with the band width would speed the crossing up again.
+   */
+  readonly travelMarginRatio: number
+  /** Short-time peak luminance requested at the core centre, in nits. */
+  readonly peakNits: number
+  /**
+   * SDR reference white of the display, in nits, when it is known. `undefined`
+   * means uncalibrated: `assumedSdrWhiteNits` is used and reported as an
+   * assumption, never as a measurement.
+   */
+  readonly sdrWhiteNits?: number
+  /** Reference white assumed while `sdrWhiteNits` is unknown. */
+  readonly assumedSdrWhiteNits: number
 }
 
 /**
- * Initial implementation values. Adjust only when the native size shows a
- * broken stroke, distortion or something clearly unnatural, and say why.
+ * Initial implementation values.
+ *
+ * The band widths are visible targets, not the old sigma dials: 0.55 x W of
+ * wide band with a 0.10 x W core, clamped to 12..24 CSS px, gives a 103 px band
+ * and a 19 px core on the shipped 188 px lockup.
  */
 export const SWEEP_PARAMS: SweepParams = Object.freeze({
   periodMs: 5000,
-  sweepMs: 1800,
+  sweepMs: 3600,
   firstDelayMs: 5000,
   tiltDeg: 25,
-  influenceSigmaRatio: 1.25,
-  coreSigmaPx: 0.7,
+  mainBandFwhmRatio: 0.55,
+  coreFwhmRatio: 0.1,
+  coreFwhmMinPx: 12,
+  coreFwhmMaxPx: 24,
   magnifyPeak: 1.08,
   magnifyRadiusPx: 5,
   liftPx: 0.8,
-  metalGain: 0.55,
-  coreGain: 1.2,
-  hdrGain: 1.1,
+  bandGain: 0.5,
+  collarGain: 0.16,
   plateFactor: 0.55,
-  travelMarginPx: 3,
+  fadeInRatio: 0.14,
+  fadeOutRatio: 0.16,
+  travelMarginRatio: 0.1,
+  peakNits: 1600,
+  assumedSdrWhiteNits: 203,
 })
 
 /**

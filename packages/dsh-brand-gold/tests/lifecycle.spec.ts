@@ -4,7 +4,9 @@
  * deletion, no frame loop while resting, and a full release on unmount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BrandSweepController, sweepEnvelope } from '../src/client/overlay.ts'
+import { BrandSweepController, beamCenterAt, crossingMs, sharedController, sweepEnvelope } from '../src/client/overlay.ts'
+import { buildLayout } from '../src/client/layout.ts'
+import { SWEEP_PARAMS } from '../src/client/sweep.ts'
 import { MARK_GEOMETRY, NAME_GEOMETRY } from '../src/client/paths.ts'
 
 /** Give an element a layout box, which jsdom does not do. */
@@ -115,6 +117,33 @@ describe('brand sweep lifecycle', () => {
     controller.dispose()
   })
 
+  it('operator gets no animation at all while reduced motion is on', () => {
+    // Given: a host that reports reduced motion.
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('reduced-motion'), addEventListener() {}, removeEventListener() {},
+    }))
+    const controller = new BrandSweepController()
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    // When: an occupant registers.
+    controller.register({ id: 'mark', root: mark, svg, geometry: MARK_GEOMETRY })
+    // Then: nothing is armed and no overlay is shown; the static gold stands.
+    expect(controller.state).not.toBe('drawing')
+    expect(document.querySelectorAll('[data-dsh-part="brand-sweep"]').length).toBe(0)
+    controller.dispose()
+    vi.unstubAllGlobals()
+  })
+
+  it('operator gets the same controller for every occupant of the lockup', () => {
+    // Given: two calls for the shared controller.
+    const first = sharedController()
+    const second = sharedController()
+    // When: they are compared.
+    // Then: one controller owns one canvas, one device and one timeline.
+    expect(first).toBe(second)
+    // And the module-level instance is the same one the components register into.
+    expect(first).toBeInstanceOf(BrandSweepController)
+  })
+
   it('operator sees the resting lockup restored exactly after a sweep', () => {
     // Given: the envelope that drives the beam.
     // When: the window has finished.
@@ -122,5 +151,30 @@ describe('brand sweep lifecycle', () => {
     // and the SVG underneath is the only thing on screen.
     expect(sweepEnvelope(1)).toBeCloseTo(0, 6)
     expect(sweepEnvelope(0)).toBe(0)
+  })
+
+  it('operator sees the beam arrive from the left and leave to the right, never both ways', () => {
+    // Given: the shared layout of the real lockup.
+    const layout = buildLayout(
+      new Map([
+        ['mark', { left: 16, top: 58, width: 24, height: 17.66 }],
+        ['name', { left: 48, top: 54, width: 156, height: 24 }],
+      ]),
+      new Map([
+        ['mark', '0 0 23.16 17.04'],
+        ['name', '26 0 156 24'],
+      ]),
+      2,
+    )!
+    // When: the centre is walked across the window.
+    const positions = [0, 0.1, 0.5, 0.9, 1].map((p) => beamCenterAt(layout.startX, layout.endX, p))
+    // Then: it never reverses, and the whole crossing is slow enough to see.
+    for (let index = 1; index < positions.length; index += 1) {
+      expect(positions[index]!).toBeGreaterThan(positions[index - 1]!)
+    }
+    expect(crossingMs(layout, SWEEP_PARAMS.sweepMs)).toBeGreaterThanOrEqual(2600)
+    // The beam starts outside the lockup on the left and ends outside it on the right.
+    expect(layout.startX).toBeLessThan(layout.pad * layout.dpr)
+    expect(layout.endX).toBeGreaterThan((layout.pad + layout.box.width) * layout.dpr)
   })
 })

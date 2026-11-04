@@ -5,12 +5,19 @@
  * SVGs with unrelated viewBoxes. Nothing here treats a viewBox as shared
  * geometry: every part is measured from its **rendered** box, mapped into one
  * viewport coordinate system, and the sweep travels across that system. The
- * popover canvas and the beam therefore see a single lockup, and the beam
- * crosses the gap between the icon and the wordmark instead of restarting.
+ * canvas and the beam therefore see a single lockup, and the beam crosses the
+ * gap between the icon and the wordmark instead of restarting.
+ *
+ * Travel is decoupled from the band width. The beam has to clear the lockup far
+ * enough for its envelope to reach zero — about ten percent of the lockup width
+ * plus the tilt compensation — and no further. Scaling the entry and exit with
+ * the band would spend the window outside the lockup and speed the crossing up
+ * again, which is the trap the previous sigma did fall into.
  *
  * @module dsh-brand-gold/layout
  */
 
+import { beamWidths, tiltTan } from './beam.ts'
 import { SWEEP_PARAMS, type SweepParams } from './sweep.ts'
 
 /** Box in viewport CSS pixels, top-left origin. */
@@ -67,13 +74,19 @@ export interface PartTransform {
 export interface LockupLayout {
   /** Union of every part's rendered box, in viewport CSS pixels. */
   readonly box: Box
-  /** Device pixels per CSS pixel. */
+  /** Device pixels per pixel of the canvas, at the current DPR. */
   readonly dpr: number
   /** Canvas size in device pixels (the union box plus the draw padding). */
   readonly width: number
   readonly height: number
-  /** Beam falloff width (sigma) in device pixels. */
+  /** Wide gold band sigma, in device pixels. */
   readonly sigma: number
+  /** Champagne core sigma, in device pixels. */
+  readonly coreSigma: number
+  /** Wide gold band visible FWHM, in CSS pixels. */
+  readonly mainFwhm: number
+  /** Champagne core visible FWHM, in CSS pixels. */
+  readonly coreFwhm: number
   /** Radius of the local magnification, in device pixels. */
   readonly magnifyRadiusPx: number
   /** Vertical centre the beam tilt is measured from, in device pixels. */
@@ -117,9 +130,13 @@ export function boxOf(element: Element): Box | undefined {
  * Map a part's viewBox onto its rendered box, honouring `preserveAspectRatio`
  * meet semantics (the shell fixes the box to the viewBox aspect, but a rounded
  * width must not skew the geometry).
+ *
+ * `box` is already in CSS pixels and `dpr` is the only place CSS becomes device
+ * pixels: the viewBox ratio is applied in CSS pixels first, then converted once.
+ *
  * @param viewBox - `minX minY width height`.
  * @param box - rendered box in viewport CSS pixels.
- * @param origin - top-left of the canvas in viewport CSS pixels.
+ * @param origin - top-left of the lockup in viewport CSS pixels.
  * @param dpr - device pixels per CSS pixel.
  * @param pad - canvas padding in CSS pixels.
  * @returns the transform for that part.
@@ -131,11 +148,31 @@ export function partTransform(
   dpr: number,
   pad: number,
 ): PartTransform {
-  const [minX = 0, minY = 0, width = 1, height = 1] = viewBox.split(/\s+/).map(Number)
-  const scale = Math.min(box.width / width, box.height / height)
-  const offsetX = ((box.left - origin.left + pad) * dpr)
-  const offsetY = ((box.top - origin.top + pad) * dpr)
-  return { scale: scale * dpr, offsetX, offsetY, box }
+  const [, , width = 1, height = 1] = viewBox.split(/\s+/).map(Number)
+  const cssScale = Math.min(box.width / width, box.height / height)
+  const offsetX = (box.left - origin.left + pad) * dpr
+  const offsetY = (box.top - origin.top + pad) * dpr
+  return { scale: cssScale * dpr, offsetX, offsetY, box }
+}
+
+/**
+ * Entry and exit travel of the beam centre, in CSS pixels, relative to the
+ * lockup box.
+ *
+ * A tenth of the lockup width gets the wide band past the edge, and half the
+ * lockup height times `abs(tan(tilt))` covers the lean, so the core is fully
+ * clear at both ends. The envelope then fades the remaining tail, instead of
+ * walking the beam off screen.
+ *
+ * @param width - lockup width, in CSS pixels.
+ * @param height - lockup height, in CSS pixels.
+ * @param params - sweep dials.
+ * @returns the horizontal overhang on each side, in CSS pixels.
+ */
+export function travelOverhang(width: number, height: number, params: SweepParams = SWEEP_PARAMS): number {
+  const margin = width * params.travelMarginRatio
+  const lean = 0.5 * height * Math.abs(tiltTan(params.tiltDeg))
+  return margin + lean + params.magnifyRadiusPx + params.liftPx
 }
 
 /**
@@ -161,16 +198,15 @@ export function buildLayout(
   const pad = Math.ceil(params.liftPx + 2) + 1
   const width = Math.max(1, Math.round((union.width + pad * 2) * dpr))
   const height = Math.max(1, Math.round((union.height + pad * 2) * dpr))
-  // The only cap is a numerical sanity bound on the width itself. It used to be
-  // clamped by the lockup height, which silently ate the dial: a sigma wider
-  // than the lockup is a legitimate (if extreme) setting and must reach the
-  // shader as configured.
-  const sigma = Math.max(2, Math.min(union.width * params.influenceSigmaRatio, union.width * 4)) * dpr
+  const widths = beamWidths(
+    union.width,
+    params.mainBandFwhmRatio,
+    params.coreFwhmRatio,
+    params.coreFwhmMinPx,
+    params.coreFwhmMaxPx,
+  )
   const centerY = (pad + union.height / 2) * dpr
-  // Entry and exit only need the beam to be clear of the lockup by a couple of
-  // sigmas; scaling this with the influence width would otherwise spend a large
-  // share of the sweep window travelling outside the lockup.
-  const margin = params.travelMarginPx * dpr + sigma
+  const overhang = travelOverhang(union.width, union.height, params)
   const parts = new Map<string, PartTransform>()
   for (const [id, box] of boxes) {
     const viewBox = viewBoxes.get(id)
@@ -182,11 +218,14 @@ export function buildLayout(
     dpr,
     width,
     height,
-    sigma,
+    sigma: widths.mainSigma * dpr,
+    coreSigma: widths.coreSigma * dpr,
+    mainFwhm: widths.mainFwhm,
+    coreFwhm: widths.coreFwhm,
     magnifyRadiusPx: params.magnifyRadiusPx * dpr,
     centerY,
-    startX: (pad - params.travelMarginPx) * dpr - margin,
-    endX: (pad + union.width + params.travelMarginPx) * dpr + margin,
+    startX: (pad - overhang) * dpr,
+    endX: (pad + union.width + overhang) * dpr,
     pad,
     parts,
   }

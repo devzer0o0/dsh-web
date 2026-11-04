@@ -18,14 +18,28 @@
  * outside the metal, so the resting logo is exactly the SVG and nothing double
  * draws.
  *
+ * The first sweep waits for the material to be uploaded, not merely for a GPU
+ * device to exist: an animation that starts before there is anything to light
+ * would spend its first cycle on an empty canvas.
+ *
  * @module dsh-brand-gold/overlay
  */
 
 import { diag } from './diag.ts'
 import { acquireDevice, currentDevice, gpuStatus, probeCapabilities, resetDevice } from './gpu.ts'
 import { buildLayout, boxOf, type Box, type BrandGeometry, type LockupLayout } from './layout.ts'
+import { calibrationOf, type Calibration } from './light.ts'
 import { compositeMaterial, type MaterialPart } from './material.ts'
-import { createRenderer, type CanvasMode, type PlateRect, type SweepRenderer } from './renderer.ts'
+import {
+  EXTENDED_MODE,
+  SDR_MODE,
+  createRenderer,
+  type CanvasMode,
+  type DrawFrame,
+  type PlateRect,
+  type ReadbackSummary,
+  type SweepRenderer,
+} from './renderer.ts'
 import { SWEEP_PARAMS, nextSweepStartAt, type SweepParams } from './sweep.ts'
 
 /**
@@ -40,8 +54,9 @@ import { SWEEP_PARAMS, nextSweepStartAt, type SweepParams } from './sweep.ts'
  * - `material-failed`: the material raster could not be produced;
  * - `composite-failed`: the canvas or the popover could not be created;
  * - `drawing`: frames are being submitted;
- * - `verified`: frames submitted and the shader read back above 1.0.
- *   Display verification is measured separately and never inferred from this.
+ * - `verified`: frames submitted and the shader read back above 1.0. This is a
+ *   shader verdict; `displayVerified` is measured separately and never inferred
+ *   from it.
  */
 export type OverlayPhase =
   | 'idle'
@@ -71,8 +86,10 @@ export interface Occupant {
 export interface OverlayState {
   /** Lifecycle phase. */
   readonly phase: OverlayPhase
-  /** Canvas compositing mode. */
-  readonly mode: CanvasMode
+  /** Requested canvas mode. */
+  readonly mode: string
+  /** Canvas mode actually in effect, as read back from the context. */
+  readonly effectiveMode: string
   /** GPU capability state. */
   readonly device: string
   /** Canvas size and device pixel ratio. */
@@ -81,16 +98,28 @@ export interface OverlayState {
   readonly frames: number
   /** Wall-clock time the last sweep started at. */
   readonly lastSweepAt: number
-  /** Peak linear value the shader produced in the last cycle. */
-  readonly peak: number
+  /** Luminance the shader asked for at the core centre, in SDR-relative units. */
+  readonly requestedPeakLinear: number
+  /** Peak linear luminance the offscreen readback found. */
+  readonly peakLinear: number
+  /** Peak coverage-weighted linear luminance, what a compositor would show. */
+  readonly peakComposited: number
+  /** Luminance in nits implied by the readback and the reference white. */
+  readonly measuredNits: number
+  /** Whether the logo is being composited with extended range. */
+  readonly displayVerified: boolean
+  /** Reference white and headroom provenance. */
+  readonly calibration: string
 }
 
 const POPOVER_PART = 'brand-sweep'
 const CANVAS_PART = 'brand-sweep-canvas'
 
-/** Envelope ramp of the sweep, as a fraction of the sweep window. */
-const FADE_IN = 0.16
-const FADE_OUT = 0.22
+/** Reduced-motion query: the sweep is off, the static gold stays. */
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
+
+/** Above this linear luminance the shader verdict counts as proven. */
+const SHADER_HDR_FLOOR = 1.02
 
 /**
  * Smooth 0..1 ramp.
@@ -107,12 +136,45 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 /**
  * Sweep envelope over the window: soft entry, near-constant travel, soft exit.
  * @param progress - 0..1 through the sweep window.
+ * @param params - tunables; the fade shares come from here.
  * @returns 0..1 amplitude.
  */
-export function sweepEnvelope(progress: number): number {
-  const inRamp = smoothstep(0, FADE_IN, progress)
-  const outRamp = 1 - smoothstep(1 - FADE_OUT, 1, progress)
+export function sweepEnvelope(progress: number, params: SweepParams = SWEEP_PARAMS): number {
+  const fadeIn = Math.max(params.fadeInRatio, 1e-4)
+  const fadeOut = Math.max(params.fadeOutRatio, 1e-4)
+  const inRamp = smoothstep(0, fadeIn, progress)
+  const outRamp = 1 - smoothstep(1 - fadeOut, 1, progress)
   return Math.max(0, Math.min(1, inRamp * outRamp))
+}
+
+/**
+ * Beam centre at one point of the sweep window.
+ * @param startX - first centre, in device pixels.
+ * @param endX - last centre, in device pixels.
+ * @param progress - 0..1 through the sweep window.
+ * @returns the centre, in device pixels.
+ */
+export function beamCenterAt(startX: number, endX: number, progress: number): number {
+  return startX + (endX - startX) * Math.min(1, Math.max(0, progress))
+}
+
+/**
+ * Time the beam centre spends inside the lockup, in milliseconds.
+ *
+ * The centre travels at a constant rate between `startX` and `endX`, so the
+ * share of the window it spends between the lockup's two edges is exactly the
+ * share of the travel those edges represent.
+ *
+ * @param layout - the measured layout.
+ * @param sweepMs - length of the visible window.
+ * @returns milliseconds from the centre reaching the left edge to the right edge.
+ */
+export function crossingMs(layout: LockupLayout, sweepMs: number): number {
+  const left = layout.pad * layout.dpr
+  const right = (layout.pad + layout.box.width) * layout.dpr
+  const span = layout.endX - layout.startX
+  if (span <= 0) return 0
+  return ((right - left) / span) * sweepMs
 }
 
 /** The shared sweep controller. */
@@ -126,6 +188,8 @@ export class BrandSweepController {
   private intersectionObserver: IntersectionObserver | undefined
   private themeObserver: MutationObserver | undefined
   private displayHandler: (() => void) | undefined
+  private motionQuery: MediaQueryList | undefined
+  private motionHandler: (() => void) | undefined
   private frame = 0
   private timer: number | undefined
   private origin = 0
@@ -136,19 +200,35 @@ export class BrandSweepController {
   private phase: OverlayPhase = 'idle'
   private frames = 0
   private lastSweepAt = 0
-  private peak = 0
+  private peakLinear = 0
+  private peakComposited = 0
+  private displayVerified = false
+  private effectiveMode = 'unknown'
+  private ready = false
   private readonly mode: CanvasMode
   private readonly params: SweepParams
+  private readonly calibration: Calibration
   private readonly onVisibility = (): void => this.handleVisibility()
   private readonly onViewport = (): void => this.rebuild('viewport')
 
   /**
    * @param params - tunables; the shipped defaults unless a test overrides them.
-   * @param mode - compositing mode of the canvas.
+   * @param mode - compositing and tone-mapping mode of the canvas.
+   * @param headroom - reported extended-range headroom, when the host exposes it.
    */
-  constructor(params: SweepParams = SWEEP_PARAMS, mode: CanvasMode = 'premultiplied') {
+  constructor(
+    params: SweepParams = SWEEP_PARAMS,
+    mode: CanvasMode = EXTENDED_MODE,
+    headroom: number | undefined = undefined,
+  ) {
     this.params = params
     this.mode = mode
+    this.calibration = calibrationOf(
+      params.peakNits,
+      params.sdrWhiteNits,
+      params.assumedSdrWhiteNits,
+      headroom,
+    )
   }
 
   /** Current phase, for the diagnostic and the tests. */
@@ -159,6 +239,11 @@ export class BrandSweepController {
   /** Compositing mode in use. */
   get canvasMode(): CanvasMode {
     return this.mode
+  }
+
+  /** Calibration record this controller reports. */
+  get calibrationRecord(): Calibration {
+    return this.calibration
   }
 
   /**
@@ -192,6 +277,16 @@ export class BrandSweepController {
    */
   rebuild(reason: string): void {
     if (this.disposed) return
+    if (this.motionAllowed() === false) {
+      // Reduced motion was switched on at runtime: stop everything and leave
+      // the static gold SVG as the lockup.
+      this.cancel()
+      this.hide()
+      this.ready = false
+      this.phase = 'idle'
+      this.publish()
+      return
+    }
     if (this.occupants.size === 0) {
       this.phase = 'anchor-missing'
       this.publish()
@@ -222,11 +317,19 @@ export class BrandSweepController {
       return
     }
     this.layout = layout
-    diag.record('layout', { reason, width: layout.width, height: layout.height, dpr })
+    diag.record('layout', {
+      reason,
+      width: layout.width,
+      height: layout.height,
+      dpr,
+      band: Math.round(layout.mainFwhm * 10) / 10,
+      core: Math.round(layout.coreFwhm * 10) / 10,
+      crossing: Math.round(crossingMs(layout, this.params.sweepMs)),
+    })
     if (!this.prepare()) return
     this.place()
     this.show()
-    this.schedule()
+    if (this.ready) this.schedule()
     void this.upload()
   }
 
@@ -236,24 +339,32 @@ export class BrandSweepController {
    */
   private prepare(): boolean {
     const status = probeCapabilities()
-    if (status.phase === 'unsupported-webgpu' || status.phase === 'unsupported-range') {
+    if (status.phase === 'unsupported-webgpu' || !status.popover) {
+      // Without WebGPU there is no sweep at all; without the popover API the
+      // canvas cannot reach the top layer. Both leave the static gold standing.
       this.phase = 'capability-missing'
       this.publish()
       diag.record('capability-missing', { reason: status.reason })
       return false
     }
+    // The extended request is always attempted when WebGPU exists. The media
+    // query is a display hint, not the canvas contract: Chromium keeps
+    // `toneMapping: 'extended'` where `(dynamic-range: high)` still reads
+    // false, so the decision is taken from the configuration read back after
+    // `configure` (see `createRenderer`), never from the query alone.
     const device = currentDevice()
     if (device === undefined) {
       const mine = this.generation
       this.publish()
       void acquireDevice().then((acquired) => {
-        if (this.disposed || mine !== this.generation) return
+        if (this.disposed || mine !== this.generation) return undefined
         if (acquired === undefined) {
           this.phase = 'gpu-init-failed'
           this.publish()
-          return
+          return undefined
         }
         this.rebuild('device-ready')
+        return undefined
       })
       return false
     }
@@ -272,6 +383,11 @@ export class BrandSweepController {
         return false
       }
       this.renderer = renderer
+      this.effectiveMode = renderer.alpha + '/' + renderer.tone
+      if (renderer.tone === 'standard' && this.mode.tone === 'extended') {
+        diag.record('sdr-fallback', { reason: 'the canvas kept standard tone mapping' })
+      }
+      diag.record('renderer', { requested: this.mode.alpha + '/' + this.mode.tone, effective: this.effectiveMode })
     }
     if (this.popover === undefined && !this.createPopover()) {
       this.phase = 'composite-failed'
@@ -354,63 +470,8 @@ export class BrandSweepController {
     if (this.popover !== undefined) this.popover.style.visibility = 'hidden'
   }
 
-  /**
-   * Composite the live lockup and hand it to the renderer.
-   *
-   * Async by nature; the generation guards against a resize, a theme change or
-   * a later layout replacing this result after it resolves.
-   */
-  private async upload(): Promise<void> {
-    const mine = ++this.generation
-    const layout = this.layout
-    const renderer = this.renderer
-    if (layout === undefined || renderer === undefined) return
-    const parts: MaterialPart[] = []
-    for (const occupant of this.occupants.values()) parts.push({ id: occupant.id, svg: occupant.svg })
-    const material = await compositeMaterial(layout, parts)
-    if (this.disposed || mine !== this.generation || material === undefined) {
-      if (material === undefined && !this.disposed && mine === this.generation) {
-        this.phase = 'material-failed'
-        this.publish()
-        diag.record('material-failed')
-      }
-      return
-    }
-    renderer.setMaterial(material)
-    this.peak = 0
-    this.frames = 0
-    this.drawRest()
-    this.phase = this.phase === 'verified' ? 'verified' : 'drawing'
-    this.publish()
-  }
-
-  /** Paint the resting state (no beam) once. */
-  private drawRest(): void {
-    const layout = this.layout
-    if (layout === undefined) return
-    this.draw(layout.startX - layout.sigma * 6, 0)
-  }
-
-  /**
-   * Parameters for drawing.
-   *
-   * The extended-range gain is only handed to a canvas that actually keeps
-   * extended values; on an SDR surface the same shader runs with the extended
-   * term at zero, so the highlight is a metal reflection instead of a clipped
-   * white patch.
-   * @returns the effective tunables.
-   */
-  private drawParams(): SweepParams {
-    return this.mode === 'opaque-extended' ? this.params : { ...this.params, hdrGain: 0 }
-  }
-
   /** The HARNESS plate of the wordmark, in canvas pixels. */
   private plateOf(): PlateRect | undefined {
-    const rect = this.plateRect()
-    return rect === undefined ? undefined : { x: rect.x, y: rect.y, width: rect.width, height: rect.height, rx: rect.rx }
-  }
-
-  private plateRect(): { x: number; y: number; width: number; height: number; rx: number } | undefined {
     const layout = this.layout
     if (layout === undefined) return undefined
     const name = this.occupants.get('name')
@@ -428,22 +489,87 @@ export class BrandSweepController {
   }
 
   /**
+   * Build the one frame description used by both `draw` and `measure`.
+   *
+   * A single resolver is what keeps the two paths comparable: they share the
+   * effective parameters, the same layout, the same envelope and the same
+   * material, so a readback can never disagree with what is on screen because of
+   * a duplicated expression.
+   *
+   * @param centerX - beam centre in device pixels.
+   * @param sweep - envelope amplitude.
+   * @returns the frame.
+   */
+  private resolveFrame(centerX: number, sweep: number): DrawFrame | undefined {
+    const layout = this.layout
+    if (layout === undefined) return undefined
+    return {
+      centerX,
+      sweep,
+      layout,
+      params: this.params,
+      peakLinear: this.calibration.requestedPeakLinear,
+      plate: this.plateOf(),
+    }
+  }
+
+  /**
+   * Composite the live lockup and hand it to the renderer.
+   *
+   * Async by nature; the generation guards against a resize, a theme change or
+   * a later layout replacing this result after it resolves. The timeline only
+   * becomes ready here, once a material exists, so the first sweep is a full
+   * delay after the resources are genuinely usable.
+   */
+  private async upload(): Promise<void> {
+    const mine = ++this.generation
+    const layout = this.layout
+    const renderer = this.renderer
+    if (layout === undefined || renderer === undefined) return
+    this.ready = false
+    const parts: MaterialPart[] = []
+    for (const occupant of this.occupants.values()) parts.push({ id: occupant.id, svg: occupant.svg })
+    const material = await compositeMaterial(layout, parts)
+    if (this.disposed || mine !== this.generation || material === undefined) {
+      if (material === undefined && !this.disposed && mine === this.generation) {
+        this.phase = 'material-failed'
+        this.publish()
+        diag.record('material-failed')
+      }
+      return
+    }
+    renderer.setMaterial(material)
+    this.frames = 0
+    this.drawRest()
+    this.ready = true
+    this.phase = this.phase === 'verified' ? 'verified' : 'drawing'
+    this.publish()
+    // The first sweep is measured from the moment the material is usable.
+    this.origin = performance.now() + this.params.firstDelayMs
+    this.schedule()
+  }
+
+  /** Paint the resting state (no beam) once. */
+  private drawRest(): void {
+    const layout = this.layout
+    const renderer = this.renderer
+    if (layout === undefined || renderer === undefined) return
+    const frame = this.resolveFrame(layout.startX, 0)
+    if (frame === undefined) return
+    renderer.draw(frame)
+    this.frames += 1
+  }
+
+  /**
    * Draw one frame.
    * @param centerX - beam centre in device pixels.
    * @param sweep - envelope amplitude.
    */
   private draw(centerX: number, sweep: number): void {
     const renderer = this.renderer
-    const layout = this.layout
-    if (renderer === undefined || layout === undefined) return
-    const plate = this.plateRect()
-    renderer.draw({
-      centerX,
-      sweep,
-      layout,
-      params: this.params,
-      plate: plate === undefined ? undefined : { x: plate.x, y: plate.y, width: plate.width, height: plate.height, rx: plate.rx },
-    })
+    const frame = this.resolveFrame(centerX, sweep)
+    if (renderer === undefined || frame === undefined) return
+    renderer.draw(frame)
     this.frames += 1
   }
 
@@ -455,7 +581,8 @@ export class BrandSweepController {
       this.timer = undefined
     }
     this.armed = false
-    if (document.hidden || !this.inViewport()) return
+    if (!this.ready) return
+    if (document.hidden || !this.inViewport() || this.motionAllowed() === false) return
     const now = performance.now()
     if (this.origin === 0) this.origin = now + this.params.firstDelayMs
     const start = nextSweepStartAt(now, this.origin, this.params)
@@ -471,7 +598,7 @@ export class BrandSweepController {
   private startSweep(): void {
     if (this.disposed || !this.armed || this.renderer === undefined) return
     this.armed = false
-    if (document.hidden || !this.inViewport()) {
+    if (document.hidden || !this.inViewport() || this.motionAllowed() === false) {
       this.schedule()
       return
     }
@@ -484,8 +611,10 @@ export class BrandSweepController {
       return
     }
     this.lastSweepAt = Date.now()
-    this.peak = 0
     diag.record('sweep-start', { late: Math.round(now - start) })
+    // The beam position is sampled at most twice a second, which is enough to
+    // read the crossing off a real display without flooding the ring buffer.
+    let nextTrace = 0
     const tick = (): void => {
       this.frame = 0
       if (this.disposed) return
@@ -493,8 +622,16 @@ export class BrandSweepController {
       if (layout === undefined || this.renderer === undefined) return
       const elapsed = performance.now() - start
       const progress = Math.min(1, Math.max(0, elapsed / this.params.sweepMs))
-      const centerX = layout.startX + (layout.endX - layout.startX) * progress
-      this.draw(centerX, sweepEnvelope(progress))
+      const envelope = sweepEnvelope(progress, this.params)
+      this.draw(beamCenterAt(layout.startX, layout.endX, progress), envelope)
+      if (elapsed >= nextTrace) {
+        nextTrace = elapsed + 100
+        diag.record('beam', {
+          t: Math.round(elapsed),
+          css: Math.round((beamCenterAt(layout.startX, layout.endX, progress) / layout.dpr) * 10) / 10,
+          envelope: Math.round(envelope * 100) / 100,
+        })
+      }
       if (this.frames % 3 === 0) this.publish()
       if (progress < 1) {
         this.frame = window.requestAnimationFrame(tick)
@@ -503,7 +640,9 @@ export class BrandSweepController {
       // The beam has left the lockup: paint the resting state once and stop.
       // The measurement runs on its own and upgrades the phase when it lands.
       this.drawRest()
-      void this.measureCycle()
+      // The readback allocates a texture and a mapped buffer; it is diagnostic
+      // work and never runs on every cycle unless diagnostics were requested.
+      if (diag.enabled) void this.measureCycle()
       this.publish()
       this.schedule()
     }
@@ -515,30 +654,33 @@ export class BrandSweepController {
    *
    * This is the shader-level check: it proves the extended encode produced
    * values above 1.0 in the shader's own output. It is not a display
-   * measurement, and the phase only reaches `verified` when it passes.
+   * measurement, and `displayVerified` is never derived from it.
    */
   private async measureCycle(): Promise<void> {
     const renderer = this.renderer
     const layout = this.layout
     if (renderer === undefined || layout === undefined) return
-    const plate = this.plateRect()
-    const centerX = (layout.startX + layout.endX) / 2
-    const peak = await renderer.measure({
-      centerX,
-      sweep: 1,
-      layout,
-      params: this.drawParams(),
-      plate: plate === undefined ? undefined : { x: plate.x, y: plate.y, width: plate.width, height: plate.height, rx: plate.rx },
-    })
+    const frame = this.resolveFrame(beamCenterAt(layout.startX, layout.endX, 0.5), 1)
+    if (frame === undefined) return
+    const summary: ReadbackSummary = await renderer.measure(frame)
     if (this.disposed) return
-    this.peak = peak
-    if (peak > 1.02 && this.phase === 'drawing') this.phase = 'verified'
-    diag.record('measure', { peak: Math.round(peak * 100) / 100, error: renderer.measureError().slice(0, 120) })
+    this.peakLinear = summary.peakLinearLuma
+    this.peakComposited = summary.peakCompositedLuma
+    // Only an extended canvas can actually present over-unity light; on a
+    // standard surface the readback above 1.0 would be a shader-only artifact.
+    this.displayVerified = this.effectiveMode.endsWith('/extended') && this.peakComposited > SHADER_HDR_FLOOR
+    if (summary.peakLinearLuma > SHADER_HDR_FLOOR && this.phase === 'drawing') this.phase = 'verified'
+    diag.record('measure', {
+      peak: Math.round(summary.peakLinearLuma * 1000) / 1000,
+      composited: Math.round(summary.peakCompositedLuma * 1000) / 1000,
+      covered: summary.coveredPixels,
+      error: renderer.measureError().slice(0, 120),
+    })
     this.publish()
   }
 
   /**
-   * Is any part of the lockup inside the viewport?
+   * Is the lockup inside the viewport?
    * @returns true when the union box intersects the viewport.
    */
   private inViewport(): boolean {
@@ -551,6 +693,15 @@ export class BrandSweepController {
       && box.left < window.innerWidth
   }
 
+  /**
+   * Whether automatic motion is allowed right now.
+   * @returns false under `prefers-reduced-motion: reduce`, true otherwise.
+   */
+  private motionAllowed(): boolean {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true
+    return !window.matchMedia(REDUCED_MOTION).matches
+  }
+
   /** Re-arm after the page becomes visible again, skipping missed sweeps. */
   private handleVisibility(): void {
     if (this.disposed) return
@@ -558,7 +709,7 @@ export class BrandSweepController {
       this.cancel()
       return
     }
-    this.origin = performance.now() + this.params.periodMs
+    this.origin = performance.now() + this.params.firstDelayMs
     this.rebuild('visible')
   }
 
@@ -581,12 +732,18 @@ export class BrandSweepController {
     const layout = this.layout
     const state: OverlayState = {
       phase: this.phase,
-      mode: this.mode,
+      mode: this.mode.alpha + '/' + this.mode.tone,
+      effectiveMode: this.effectiveMode,
       device: gpuStatus().phase,
       layout: layout === undefined ? 'none' : layout.width + 'x' + layout.height + '@' + layout.dpr,
       frames: this.frames,
       lastSweepAt: this.lastSweepAt,
-      peak: this.peak,
+      requestedPeakLinear: this.calibration.requestedPeakLinear,
+      peakLinear: this.peakLinear,
+      peakComposited: this.peakComposited,
+      measuredNits: this.peakComposited * (this.calibration.sdrWhiteNits ?? this.params.assumedSdrWhiteNits),
+      displayVerified: this.displayVerified,
+      calibration: this.calibration.sdrWhiteSource + '/headroom:' + this.calibration.headroomSource,
     }
     diag.publish(state)
   }
@@ -611,6 +768,18 @@ export class BrandSweepController {
       this.themeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'class'] })
     }
     this.watchDisplay()
+    this.watchMotion()
+  }
+
+  /** Follow `prefers-reduced-motion` while the plugin is mounted. */
+  private watchMotion(): void {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    this.motionHandler?.()
+    const query = window.matchMedia(REDUCED_MOTION)
+    const handler = (): void => this.rebuild('reduced-motion')
+    query.addEventListener?.('change', handler)
+    this.motionQuery = query
+    this.motionHandler = () => query.removeEventListener?.('change', handler)
   }
 
   /**
@@ -660,10 +829,13 @@ export class BrandSweepController {
     this.intersectionObserver?.disconnect()
     this.themeObserver?.disconnect()
     this.displayHandler?.()
+    this.motionHandler?.()
     this.resizeObserver = undefined
     this.intersectionObserver = undefined
     this.themeObserver = undefined
     this.displayHandler = undefined
+    this.motionHandler = undefined
+    this.motionQuery = undefined
     if (this.listening) {
       window.removeEventListener('visibilitychange', this.onVisibility)
       window.removeEventListener('resize', this.onViewport)
@@ -681,6 +853,7 @@ export class BrandSweepController {
     this.popover = undefined
     this.canvas = undefined
     this.layout = undefined
+    this.ready = false
     if (shared === this) shared = undefined
     diag.record('dispose')
   }
@@ -689,6 +862,7 @@ export class BrandSweepController {
   resetGpu(): void {
     this.renderer?.dispose()
     this.renderer = undefined
+    this.ready = false
     resetDevice()
     this.generation += 1
     this.rebuild('gpu-reset')
@@ -706,3 +880,6 @@ export function sharedController(): BrandSweepController {
   shared ??= new BrandSweepController()
   return shared
 }
+
+/** The default canvas mode: extended tone mapping behind transparency. */
+export { EXTENDED_MODE, SDR_MODE }

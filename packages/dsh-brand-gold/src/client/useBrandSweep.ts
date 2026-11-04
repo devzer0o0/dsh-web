@@ -15,9 +15,6 @@ import { useEffect, useRef, type RefObject } from 'react'
 import type { BrandGeometry } from './layout.ts'
 import { sharedController } from './overlay.ts'
 
-/** Reduced-motion query: the sweep is off, the static gold stays. */
-const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
-
 /** Refs handed back to the component. */
 export interface BrandSweepRefs {
   /** Root element of the occupant. */
@@ -40,11 +37,10 @@ export function useBrandSweep(id: string, geometry: BrandGeometry): BrandSweepRe
     const element = root.current
     const shape = svg.current
     if (element === null || shape === null) return
-    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      && window.matchMedia(REDUCED_MOTION).matches) {
-      return
-    }
     const controller = sharedController()
+    // The controller re-reads the query on every rebuild and on every change
+    // event, so switching reduced motion on or off while mounted takes effect
+    // without a reload; registering here is unconditional on purpose.
     controller.register({ id, root: element, svg: shape, geometry })
     return () => controller.unregister(id)
   }, [id, geometry])

@@ -34,14 +34,26 @@ export interface GpuCanvasConfiguration {
   device: GpuDevice
   /** Half-float storage; required for any value above 1.0. */
   format: 'rgba16float'
-  /** Opaque: over-unity values were measured to survive only on this mode. */
+  /** How the canvas composites with the page; independent of `toneMapping`. */
   alphaMode: 'opaque' | 'premultiplied'
-  /** `extended` or the compositor clamps everything at 1.0. */
+  /** `extended` keeps over-unity values; `standard` clamps them. */
   toneMapping: { mode: 'standard' | 'extended' }
   /** Declared output space of the canvas. */
   colorSpace: 'srgb' | 'display-p3'
   /** Usage bits; the layer only renders. */
   usage: number
+}
+
+/** What the browser reports back after `configure`. */
+export interface GpuCanvasConfigurationReadback {
+  /** Alpha mode actually in effect. */
+  readonly alphaMode?: 'opaque' | 'premultiplied'
+  /** Tone mapping actually in effect. */
+  readonly toneMapping?: { readonly mode?: 'standard' | 'extended' }
+  /** Storage format actually in effect. */
+  readonly format?: string
+  /** Output colour space actually in effect. */
+  readonly colorSpace?: string
 }
 
 /** Texture handle. */
@@ -159,6 +171,12 @@ export interface Gpu {
 export interface GpuCanvasContext {
   /** Apply the canvas configuration. */
   configure(configuration: GpuCanvasConfiguration): void
+  /**
+   * Read back the configuration actually in effect. Chromium implements this;
+   * when a browser does not, the requested values stand and the diagnostic
+   * reports them as unverified.
+   */
+  getConfiguration?(): GpuCanvasConfigurationReadback
   /** Remove the configuration. */
   unconfigure(): void
   /** Current swap-chain texture. */
